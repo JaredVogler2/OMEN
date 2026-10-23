@@ -1,0 +1,24 @@
+# python / tooling
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+
+# local state: ledgers, backups, locks (never commit)
+.omen/
+.omen-state/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+backups/
+
+# secrets: never commit real environment files or keys
+.env
+.env.*
+!.env.example
+*.pem
+*.key

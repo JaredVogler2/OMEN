@@ -1,0 +1,40 @@
+# Kalshi trading-fee FORMULA constants.
+#
+# What changes often is read live from the API on every refresh, never from this file:
+#   * each series' fee_type and fee_multiplier             GET /series            (all ~15k series, one request)
+#   * scheduled series fee changes (past and future)        GET /series/fee_changes?show_historical=true
+#   * per-event fee overrides (e.g. playoff games)          GET /events/fee_changes
+# OMEN posts a #kalshi-status notice whenever any of those change, and refuses to price a market whose fee_type it
+# does not recognise (fail closed).
+#
+# What lives here is the formula behind each fee_type, from Kalshi's fee schedule PDF:
+#   fee = round_up( multiplier x rate x contracts x price x (1 - price) )
+# OMEN rounds every fill up to [rounding] increment (config/omen.toml, [fees].rounding_increment; default one cent).
+# That never understates the cost: direct members are actually aligned to $0.0001 with rebates.
+#
+# If Kalshi publishes a new schedule, update the numbers below and verified_on. OMEN reminds you every
+# [fees].verify_reminder_days days and alerts if the PDF's headers change (when kalshi.com lets the bot see them).
+
+schedule_version = "2026-07-07"
+verified_on = "2026-10-23"
+source_url = "https://kalshi.com/docs/kalshi-fee-schedule.pdf"
+api_reference = "https://docs.kalshi.com/api-reference/market/get-series"
+rounding_reference = "https://docs.kalshi.com/getting_started/fee_rounding"
+
+[fee_types.quadratic]
+taker_rate = "0.07"
+maker_rate = "0"
+
+[fee_types.quadratic_with_maker_fees]
+taker_rate = "0.07"
+maker_rate = "0.0175"   # 0.25 x taker
+
+[fee_types.quadratic_with_combo_maker_fees]
+taker_rate = "0.07"
+maker_rate = "0.035"    # 0.5 x taker
+
+[fee_types.flat]
+# Flat-fee series use the PDF's "Specific Trading Fees Table", which is not available through the API. OMEN refuses
+# to price them until you copy the per-contract amounts here, e.g.:
+#   taker_per_contract = "0.02"
+#   maker_per_contract = "0.00"

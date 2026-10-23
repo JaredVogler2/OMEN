@@ -1,0 +1,42 @@
+# CI for pull requests and pushes to main: lint, format check and the full test suite (no network, no secrets).
+# Third-party actions are pinned to full commit SHAs (same pins as STONKS2026's workflows).
+# Cost: ~1 minute per run, from the account's shared Actions minutes.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: lint + tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.11.32"
+          python-version: "3.11"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install (locked)
+        run: uv sync --locked
+      - name: Lint
+        run: uv run ruff check src tests
+      - name: Format
+        run: uv run ruff format --check src tests
+      - name: Tests
+        run: uv run pytest
+      - name: Config loads
+        run: uv run python -c "from omen.config import load_settings; load_settings('config/omen.toml')"

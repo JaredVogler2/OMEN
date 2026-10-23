@@ -1,0 +1,41 @@
+# Rendered by scripts/install-pi.sh. Placeholders: @USER@ @APP_DIR@ @ENV_FILE@ @STATE_DIR@ @UV@
+# Runs next to the STONKS/APEX services on the same Raspberry Pi; it shares only the Discord server, never a token
+# file or a database.
+[Unit]
+Description=OMEN Kalshi scanner
+Documentation=file://@APP_DIR@/docs/OPERATIONS.md
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
+StartLimitIntervalSec=900
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@APP_DIR@
+EnvironmentFile=@ENV_FILE@
+Environment=PYTHONUNBUFFERED=1 OMEN_STATE_DIR=@STATE_DIR@ OMEN_PROJECT_ROOT=@APP_DIR@
+ExecStart=@UV@ run --frozen --no-sync omen run
+Restart=on-failure
+RestartSec=60
+# 2 = bad configuration, 3 = a second instance already holds the ledger lock: do not restart-loop
+RestartPreventExitStatus=2 3
+TimeoutStopSec=60
+MemoryMax=900M
+Nice=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@STATE_DIR@ @APP_DIR@/.venv
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
