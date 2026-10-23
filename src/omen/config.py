@@ -156,6 +156,10 @@ class Settings:
     kalshi_api_key_id: str | None = None
     kalshi_private_key_path: str | None = None
     live_ack: str | None = None
+    web_url: str | None = None  # the OMEN website the Pi publishes its live feed to
+    ingest_secret: str | None = None  # shared HMAC secret (same value in Vercel)
+    vercel_bypass: str | None = None  # only if Vercel Deployment Protection covers the production URL
+    publish_interval_seconds: int = 120
     project_root: Path = field(default_factory=lambda: Path.cwd())
 
     @property
@@ -252,6 +256,18 @@ def load_settings(config_path: str | os.PathLike[str] | None = None, env: dict[s
     settings.kalshi_api_key_id = env.get("KALSHI_API_KEY_ID") or None
     settings.kalshi_private_key_path = env.get("KALSHI_PRIVATE_KEY_PATH") or None
     settings.live_ack = env.get("OMEN_LIVE_ACK") or None
+    settings.web_url = (env.get("OMEN_WEB_URL") or "").strip().rstrip("/") or None
+    settings.ingest_secret = env.get("OMEN_INGEST_SECRET") or None
+    settings.vercel_bypass = env.get("OMEN_VERCEL_BYPASS") or None
+    if env.get("OMEN_PUBLISH_SECONDS"):
+        try:
+            settings.publish_interval_seconds = max(30, int(env["OMEN_PUBLISH_SECONDS"]))
+        except ValueError:
+            raise ConfigError("OMEN_PUBLISH_SECONDS must be a whole number of seconds") from None
+    if settings.web_url and not settings.web_url.startswith("https://"):
+        raise ConfigError("OMEN_WEB_URL must start with https:// (the feed carries your plays)")
+    if settings.web_url and len(settings.ingest_secret or "") < 16:
+        raise ConfigError("OMEN_WEB_URL is set but OMEN_INGEST_SECRET is missing or shorter than 16 characters")
     if env.get("OMEN_EXECUTION_MODE"):
         settings.execution.mode = env["OMEN_EXECUTION_MODE"].strip().lower()
     if settings.execution.mode not in {"off", "demo", "live"}:

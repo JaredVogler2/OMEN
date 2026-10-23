@@ -29,7 +29,6 @@ from omen.strategies.structure import (
     UPPER_TYPES,
     all_no_settlement_risk,
     check_partition,
-    interval_of,
     ladder_groups,
 )
 
@@ -57,6 +56,32 @@ class Candidate:
 
 def _rate(fee: FeeLookup, m: Market, price: Decimal) -> Decimal:
     return fee(m).taker_rate_per_contract(price)
+
+
+def basket_event_prescreen(
+    by_event: dict[str, list[Market]], fee: FeeLookup, margin: Decimal = SCREEN_MARGIN
+) -> set[str]:
+    """Events whose quotes could support a NO or YES basket, judged from prices alone (before knowing whether the
+    event is mutually exclusive). Only these need their event metadata fetched. A negative ``margin`` also admits
+    near misses (for diagnostics)."""
+    out = set()
+    for ticker, markets in by_event.items():
+        if len(markets) < 2:
+            continue
+        try:
+            no_side = sum(
+                (c for m in markets if m.has_yes_bid and (c := m.yes_bid - _rate(fee, m, m.no_ask)) > 0), ZERO
+            )
+            if no_side - ONE > margin:
+                out.add(ticker)
+                continue
+            if all(m.has_yes_ask for m in markets):
+                cost = sum((m.yes_ask + _rate(fee, m, m.yes_ask) for m in markets), ZERO)
+                if ONE - cost > margin:
+                    out.add(ticker)
+        except FeeUnavailable:
+            continue
+    return out
 
 
 # --------------------------------------------------------------------------------------------------- NO basket
@@ -119,22 +144,22 @@ def screen_ladders(events: dict[str, Event], markets: list[Market], fee: FeeLook
     for group in ladder_groups(markets):
         pairs = []
         try:
-            for a in group:  # a = the narrower outcome (implies b); we sell it (buy NO)
-                if not a.has_yes_bid:
-                    continue
-                ia = interval_of(a)
-                for b in group:
-                    if b is a or not b.has_yes_ask:
-                        continue
-                    ib = interval_of(b)
-                    if ia is None or ib is None or not ib.contains_interval(ia):
-                        continue
-                    edge = a.yes_bid - b.yes_ask - _rate(fee, a, a.no_ask) - _rate(fee, b, b.yes_ask)
-                    if edge > SCREEN_MARGIN:
-                        pairs.append((edge, a, b))
+            # value of selling A (buying NO at 1 - bid) and cost of buying B, net of the marginal fee
+            sell = {m.ticker: m.yes_bid - _rate(fee, m, m.no_ask) for m, _ in group if m.has_yes_bid}
+            buy = {m.ticker: m.yes_ask + _rate(fee, m, m.yes_ask) for m, _ in group if m.has_yes_ask}
         except FeeUnavailable as exc:
-            log.debug("skip ladder %s: %s", group[0].event_ticker, exc)
+            log.debug("skip ladder %s: %s", group[0][0].event_ticker, exc)
             continue
+        ivs = {m.ticker: iv for m, iv in group}
+        for a, ia in group:  # a = the narrower outcome (implies b); we sell it (buy NO)
+            if a.ticker not in sell:
+                continue
+            for b, ib in group:
+                if b is a or b.ticker not in buy or not ib.contains_interval(ia):
+                    continue
+                edge = sell[a.ticker] - buy[b.ticker]
+                if edge > SCREEN_MARGIN:
+                    pairs.append((edge, a, b))
         used: set[str] = set()
         for edge, a, b in sorted(pairs, key=lambda p: p[0], reverse=True):
             if a.ticker in used or b.ticker in used:
@@ -159,9 +184,9 @@ def screen_ladders(events: dict[str, Event], markets: list[Market], fee: FeeLook
                     risks=["Leg risk: fill both legs (fill-or-kill) or unwind."],
                     evidence={
                         "implied": a.ticker,
-                        "implying_interval": interval_of(a).describe(),  # type: ignore[union-attr]
+                        "implying_interval": ivs[a.ticker].describe(),
                         "covering": b.ticker,
-                        "covering_interval": interval_of(b).describe(),  # type: ignore[union-attr]
+                        "covering_interval": ivs[b.ticker].describe(),
                     },
                     confidence=0.99,
                     top_edge=edge,
@@ -307,3 +332,130 @@ def _verify_legs(c: Candidate, legs: list[tuple[Market, str]], ctx: VerifyContex
         risks=list(c.risks),
         evidence=dict(c.evidence),
     )
+
+
+# ------------------------------------------------------------------------------------------------- diagnostics
+def explain_failure(c: Candidate, ctx: VerifyContext) -> str:
+    """Why a screened candidate did not become a play: the best it could do on the real book with every floor off."""
+    for m, _ in c.legs:
+        if m.ticker not in ctx.books:
+            return f"no order book returned for {m.ticker}"
+    specs = []
+    try:
+        for m, side in c.legs:
+            asks = ctx.books[m.ticker].asks(side)
+            if not asks:
+                return f"nobody is offering {side.upper()} on {m.ticker}"
+            specs.append(LegSpec(m, side, asks, ctx.fee(m)))
+    except FeeUnavailable as exc:
+        return f"fee unavailable: {exc}"
+    payout = c.payout_per_set if c.strategy != "no_basket" else Decimal(len(c.legs) - 1)
+    settles = max(m.settles_at for m, _ in c.legs)
+    seconds = Decimal(max(3600, int((settles - ctx.now).total_seconds())))
+    s = ctx.settings
+    relaxed = SizingLimits(
+        s.max_capital_usd,
+        s.max_contracts_per_leg,
+        s.whole_contracts,
+        Decimal("-1e9"),
+        Decimal("-1e9"),
+        Decimal("-1e9"),
+        seconds,
+    )
+    best = size_sets(specs, payout, relaxed)
+    if best is None:
+        return "order book too thin for even one whole set"
+    if best.profit <= 0:
+        return f"after fees and depth the best size loses {usd_plain(-best.profit)}"
+    ret = best.profit / best.capital * 100
+    apr = ret * Decimal(365 * 24 * 3600) / seconds
+    reasons = []
+    if best.profit < s.min_profit_usd:
+        reasons.append(f"profit {usd_plain(best.profit)} < {usd_plain(s.min_profit_usd)} floor")
+    if ret < s.min_return_pct:
+        reasons.append(f"return {ret:.2f}% < {s.min_return_pct}%")
+    if apr < s.min_apr_pct:
+        reasons.append(f"APR {apr:.1f}% < {s.min_apr_pct}%")
+    return "; ".join(reasons) or "did not clear the floors at any single depth breakpoint"
+
+
+def usd_plain(v: Decimal) -> str:
+    return f"${v.quantize(Decimal('0.01')):,}"
+
+
+def near_misses(
+    events: dict[str, Event],
+    by_event: dict[str, list[Market]],
+    markets: list[Market],
+    fee: FeeLookup,
+    limit: int = 12,
+    allow_step_gaps: bool = True,
+) -> list[dict]:
+    """The structures closest to becoming a play, by top-of-book edge per set (negative = how far away).
+
+    Only structures the real screens would accept are listed: a YES basket must be a provable partition (a
+    candidate list with "other" outcomes unlisted is cheap for a reason, not a near miss)."""
+    rows: list[dict] = []
+    for ticker, ms in by_event.items():
+        ev = events.get(ticker)
+        if ev is None or not ev.mutually_exclusive or len(ms) < 2:
+            continue
+        try:
+            contrib = [m.yes_bid - _rate(fee, m, m.no_ask) for m in ms if m.has_yes_bid]
+            if len(contrib) >= 2:
+                edge = sum((c for c in contrib if c > 0), ZERO) - ONE
+                rows.append(
+                    {
+                        "strategy": "no_basket",
+                        "event_ticker": ticker,
+                        "title": ev.title,
+                        "edge": float(edge),
+                        "legs": sum(1 for c in contrib if c > 0),
+                    }
+                )
+            if (
+                all(m.has_yes_ask for m in ms)
+                and check_partition(ms, allow_step_gaps).ok
+                and not all_no_settlement_risk(ms)
+            ):
+                cost = sum((m.yes_ask + _rate(fee, m, m.yes_ask) for m in ms), ZERO)
+                rows.append(
+                    {
+                        "strategy": "yes_partition",
+                        "event_ticker": ticker,
+                        "title": ev.title,
+                        "edge": float(ONE - cost),
+                        "legs": len(ms),
+                    }
+                )
+        except FeeUnavailable:
+            continue
+    for group in ladder_groups(markets):
+        try:
+            best = None
+            for a, ia in group:
+                if not a.has_yes_bid:
+                    continue
+                sell = a.yes_bid - _rate(fee, a, a.no_ask)
+                for b, ib in group:
+                    if b is a or not b.has_yes_ask or not ib.contains_interval(ia):
+                        continue
+                    edge = sell - (b.yes_ask + _rate(fee, b, b.yes_ask))
+                    if best is None or edge > best[0]:
+                        best = (edge, a, b)
+        except FeeUnavailable:
+            continue
+        if best is not None:
+            edge, a, b = best
+            rows.append(
+                {
+                    "strategy": "ladder",
+                    "event_ticker": a.event_ticker,
+                    "title": a.title,
+                    "edge": float(edge),
+                    "legs": 2,
+                    "detail": f"{b.yes_sub_title} vs {a.yes_sub_title}",
+                }
+            )
+    rows.sort(key=lambda r: r["edge"], reverse=True)
+    return rows[:limit]

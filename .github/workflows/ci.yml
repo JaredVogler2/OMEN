@@ -1,6 +1,7 @@
-# CI for pull requests and pushes to main: lint, format check and the full test suite (no network, no secrets).
+# CI for pull requests and pushes to main: lint, format check, the full test suite (no network, no secrets) and the
+# website build (typecheck + bundle).
 # Third-party actions are pinned to full commit SHAs (same pins as STONKS2026's workflows).
-# Cost: ~1 minute per run, from the account's shared Actions minutes.
+# Cost: ~1–2 minutes per run (two small jobs), from the account's shared Actions minutes.
 name: ci
 
 on:
@@ -27,7 +28,7 @@ jobs:
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "0.11.32"
-          python-version: "3.11"
+          python-version: "3.12"
           enable-cache: true
           cache-dependency-glob: uv.lock
       - name: Install (locked)
@@ -40,3 +41,18 @@ jobs:
         run: uv run pytest
       - name: Config loads
         run: uv run python -c "from omen.config import load_settings; load_settings('config/omen.toml')"
+
+  web:
+    name: website build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Node version
+        run: node --version
+      - name: Install (locked)
+        run: npm --prefix web ci
+      - name: Typecheck and build
+        run: npm --prefix web run build

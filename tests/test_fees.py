@@ -133,3 +133,23 @@ def test_unknown_fee_types_reported():
     assert reg.unknown_fee_types() == {"flat", "mystery"}
     with pytest.raises(FeeUnavailable):
         reg.quote("KXB", None, NOW)
+
+
+def test_http_client_backs_off_and_adapts_rate_on_429():
+    import httpx
+
+    from omen.http import HttpClient
+
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return httpx.Response(429, headers={"Retry-After": "0"}, json={"error": "too many requests"})
+        return httpx.Response(200, json={"ok": True})
+
+    sleeps = []
+    http = HttpClient("https://x.test", rate_per_second=8, transport=httpx.MockTransport(handler), sleep=sleeps.append)
+    assert http.get_json("/a") == {"ok": True}
+    assert calls["n"] == 3
+    assert http.limiter.rate == 2  # halved twice

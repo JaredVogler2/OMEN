@@ -6,6 +6,9 @@ Raspberry Pi you already have for APEX, or any always-on Linux box. GitHub Actio
 
 It never places a real order unless you explicitly turn execution on ([docs/EXECUTION.md](docs/EXECUTION.md)).
 
+A private **website** on Vercel's free plan shows every play worth playing live, runs scans on demand and explains
+the fees behind each number ([docs/WEB.md](docs/WEB.md)).
+
 ## What counts as "high confidence"
 
 OMEN has two tiers, and it never mixes them up.
@@ -79,6 +82,13 @@ uv run omen --env-file ~/.config/omen/omen.env discord-test
 journalctl -u omen -f
 ```
 
+## Website
+
+Plays, on-demand scans, a fee explorer and calculator, the crypto model's view, paper performance and system health,
+on Vercel Hobby with free Upstash Redis: $0. The Pi pushes its live state to the site after each cycle (signed with a
+shared secret); the site never holds Kalshi keys or places orders. Setup takes about 10 minutes:
+[docs/WEB.md](docs/WEB.md).
+
 ## Commands
 
 | Command | What it does |
@@ -92,6 +102,8 @@ journalctl -u omen -f
 | `omen show <id>` | The full record of an alerted play (the id is in the alert footer). |
 | `omen promote crypto_threshold [--state shadow]` | Moves a model to live once its gates pass, or demotes it. |
 | `omen doctor` / `omen discord-test` / `omen digest` / `omen backup <file>` | Operations. |
+| `omen publish` | Pushes the live feed to the website once (setup check; `omen run` publishes on its own). |
+| `omen web` | Runs the website locally (API + built frontend) for previews. |
 
 ## Documentation
 
@@ -100,13 +112,17 @@ journalctl -u omen -f
 * [docs/OPERATIONS.md](docs/OPERATIONS.md): Pi install, the Actions fallback, costs, health checks, backups, and the kill switch.
 * [docs/DISCORD.md](docs/DISCORD.md): channels in the STONKS server, webhooks or the APEX bot token.
 * [docs/EXECUTION.md](docs/EXECUTION.md): optional demo and live order placement and its guards.
+* [docs/WEB.md](docs/WEB.md): the website: pages, architecture, free-plan budget, setup and security.
+* [docs/PI_HARDWARE.md](docs/PI_HARDWARE.md): one Raspberry Pi for STONKS and OMEN: shopping list and step-by-step plan.
 
 ## Status and honesty
 
-* Tested: 72 unit and end-to-end tests. They cover fee math against Kalshi's published examples, structural traps
-  (opposite-team spreads, holes in partitions, fair-price clauses) and a fake-exchange pipeline (alert → GONE edit →
-  settlement → fee-change notice). Read-only scans against the live Kalshi API ran from the build environment. A full scan covered 170,159 markets in
-  132 s and found 0 verified plays, which is normal on efficient books.
+* Tested: 93 unit and end-to-end tests. They cover fee math against Kalshi's published examples, structural traps
+  (opposite-team spreads, holes in partitions, fair-price clauses), a fake-exchange pipeline (alert → GONE edit →
+  settlement → fee-change notice) and the website API (auth, signed ingest, streamed scans, budgets). Read-only scans
+  against the live Kalshi API ran from the build environment. The latest full scan (2026-10-23) covered 169,024
+  markets in 85 s: 4 structures looked profitable at the top of the book, and none survived full depth, fees and the
+  APR floor. That is normal on efficient books.
 * Not yet done: running on the Pi, posting to the real Discord server, or placing any order (demo or live). Those
   need your accounts.
 * Real LOCK plays are rare and often small. Most cycles will find nothing, and that is the correct output. The paper

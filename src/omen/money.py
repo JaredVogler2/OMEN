@@ -79,14 +79,13 @@ class PriceGrid:
     @classmethod
     def from_api(cls, ranges: list[dict] | None) -> PriceGrid:
         if not ranges:
-            return cls((PriceBand(ZERO, ONE, CENT),))
-        bands = tuple(
-            sorted(
-                (PriceBand(dec(r["start"]), dec(r["end"]), dec(r["step"])) for r in ranges),
-                key=lambda b: b.start,
-            )
-        )
-        return cls(bands)
+            return _DEFAULT_GRID
+        key = tuple((str(r["start"]), str(r["end"]), str(r["step"])) for r in ranges)
+        grid = _GRIDS.get(key)
+        if grid is None:  # a handful of distinct structures exist; parse each once
+            bands = tuple(sorted((PriceBand(dec(a), dec(b), dec(c)) for a, b, c in key), key=lambda b: b.start))
+            grid = _GRIDS[key] = cls(bands)
+        return grid
 
     def _band_for(self, price: Decimal) -> PriceBand:
         for band in self.bands:
@@ -107,3 +106,7 @@ class PriceGrid:
         band = self._band_for(price)
         snapped = band.start + ceil_to(price - band.start, band.step)
         return min(snapped, band.end)
+
+
+_DEFAULT_GRID = PriceGrid((PriceBand(ZERO, ONE, CENT),))
+_GRIDS: dict[tuple, PriceGrid] = {}

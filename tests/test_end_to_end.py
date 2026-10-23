@@ -33,6 +33,7 @@ class FakeKalshi:
         self.event_changes = []
         self.settled: dict[str, str] = {}
         self.trading = True
+        self.listed = True  # False: the event's markets have closed and no longer appear in sweeps
 
     def market(self, c):
         t = f"KXELECT-26-{c}"
@@ -103,7 +104,8 @@ class FakeKalshi:
                 return httpx.Response(
                     200, json={"markets": [self.market(t.rsplit("-", 1)[1]) for t in want], "cursor": ""}
                 )
-            return httpx.Response(200, json={"markets": [self.market(c) for c in "ABC"], "cursor": ""})
+            listed = [self.market(c) for c in "ABC"] if self.listed else []
+            return httpx.Response(200, json={"markets": listed, "cursor": ""})
         if path == "/markets/orderbooks":
             books = []
             for t in q["tickers"]:
@@ -225,3 +227,19 @@ def test_improved_play_realerts_and_supersedes_old_message(tmp_path):
     plays = [p for m, p in posts if m == "POST" and "LOCK" in p["embeds"][0]["title"]]
     edits = [p for m, p in posts if m == "PATCH"]
     assert len(plays) == 2 and edits[-1]["embeds"][0]["title"].startswith("↻ UPDATED")
+
+
+def test_play_is_gone_once_its_markets_close(tmp_path):
+    fake, posts = FakeKalshi(), []
+    now = {"t": T0}
+    runner, ledger = build(tmp_path, fake, posts, lambda: now["t"])
+    runner.run_once("full")
+    assert len(ledger.live_opportunities()) == 1
+    # trading ends: the markets vanish from open-market sweeps, so they can never be "re-checked"
+    fake.listed = False
+    now["t"] = T0 + timedelta(hours=1)
+    runner.scan_cycle("hot")
+    assert len(ledger.live_opportunities()) == 1  # still before the close: absence alone proves nothing
+    now["t"] = CLOSE + timedelta(minutes=1)
+    runner.scan_cycle("hot")
+    assert ledger.live_opportunities() == []

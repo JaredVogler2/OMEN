@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import json
 import logging
 import signal
 import sys
@@ -25,6 +26,8 @@ from omen.engine import Engine, Notice, ScanResult
 from omen.ledger import Ledger, from_iso, iso
 from omen.money import usd
 from omen.paper import open_position, resolve_predictions, settle_positions
+from omen.publish import Publisher
+from omen.snapshot import play_dict
 from omen.strategies.base import LOCK, Opportunity
 from omen.watchdog import check_fee_document
 
@@ -71,6 +74,7 @@ class Runner:
         clock: Callable[[], datetime] | None = None,
         sleep: Callable[[float], None] = time.sleep,
         fee_doc_transport: httpx.BaseTransport | None = None,
+        publisher: Publisher | None = None,
     ):
         self.s = settings
         self.engine = engine
@@ -82,6 +86,7 @@ class Runner:
         self.sleep = sleep
         self.stopping = False
         self.fee_doc_transport = fee_doc_transport
+        self.publisher = publisher
         self._last_error_notice: dict[str, datetime] = {}
 
     # ------------------------------------------------------------------------------------------------ routing
@@ -136,7 +141,7 @@ class Runner:
                 opp.event_ticker,
                 opp.title,
                 opp.profit,
-                _payload(opp),
+                _payload(opp, self.s.lock.max_plausible_return_pct),
                 now,
             )
             channel, state = self._route(opp)
@@ -172,7 +177,11 @@ class Runner:
                         log.exception("executor failed")
                         report.notices.append(Notice("execution", "Execution error", str(exc)[:1500], "error"))
         for row in self.ledger.live_opportunities():
-            if row["key"] in live or row["strategy"] not in strategies or not tickers_of(row["key"]) <= scope:
+            if row["key"] in live or row["strategy"] not in strategies:
+                continue
+            # gone if every market was re-checked and it no longer qualifies, or if a leg has stopped trading
+            # (closed markets drop out of the sweeps, so they would never be re-checked)
+            if not (tickers_of(row["key"]) <= scope or _closed(row, now)):
                 continue
             self.ledger.mark_gone(row["key"], now)
             report.gone += 1
@@ -256,6 +265,15 @@ class Runner:
     def flush(self) -> None:
         if self.notifier.configured:
             self.notifier.flush(self.clock())
+
+    def publish(self) -> None:
+        """Push the live feed to the website (if configured). Best-effort: never interrupts scanning."""
+        if self.publisher is None:
+            return
+        try:
+            self.publisher.maybe_publish(self.ledger, self.engine, self.models, self.s, self.clock())
+        except Exception:
+            log.exception("website publish failed")
 
     # --------------------------------------------------------------------------------------------------- digest
     def maybe_digest(self, force: bool = False) -> bool:
@@ -353,6 +371,7 @@ class Runner:
             except Exception as exc:
                 self._error("digest", exc)
             self.flush()
+            self.publish()
             next_due = min(due.values()) if self.models else min(due["hot"], due["full"], due["settle"])
             while not self.stopping and time.monotonic() < next_due:
                 self.sleep(min(1.0, max(0.05, next_due - time.monotonic())))
@@ -377,35 +396,23 @@ class Runner:
         )
         self.maybe_digest()
         self.flush()
+        self.publish()
         self.ping(True)
         return report
 
 
-def _payload(opp: Opportunity) -> dict:
-    return {
-        "tier": opp.tier,
-        "sets": str(opp.sets),
-        "capital": str(opp.capital),
-        "fees": str(opp.fees),
-        "profit": str(opp.profit),
-        "return_pct": f"{opp.return_pct:.4f}",
-        "settles_at": opp.settles_at.isoformat(),
-        "legs": [
-            {
-                "ticker": lp.market.ticker,
-                "side": lp.side,
-                "count": str(lp.fill.count),
-                "limit": str(lp.limit_price),
-                "notional": str(lp.fill.notional),
-                "fees": str(lp.fill.fees),
-                "fee_terms": lp.fee.describe(),
-            }
-            for lp in opp.legs
-        ],
-        "probability": opp.probability,
-        "model_probability": opp.model_probability,
-        "evidence": opp.evidence,
-    }
+def _closed(row: Any, now: datetime) -> bool:
+    """Has any leg of this recorded play reached its close time?"""
+    try:
+        legs = json.loads(row["last_payload"] or "{}").get("legs") or []
+        closes = [from_iso(leg["close_time"]) for leg in legs if leg.get("close_time")]
+    except (TypeError, ValueError, AttributeError):
+        return False
+    return any(c is not None and c <= now for c in closes)
+
+
+def _payload(opp: Opportunity, max_plausible_return_pct: Decimal | None = None) -> dict:
+    return play_dict(opp, "pi", max_plausible_return_pct)
 
 
 def build_digest(

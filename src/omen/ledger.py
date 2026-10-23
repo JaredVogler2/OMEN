@@ -72,7 +72,8 @@ class Ledger:
         self.path = Path(path)
         if str(path) != ":memory:":
             self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(str(path), timeout=30, isolation_level=None)
+        # check_same_thread=False: the website handles requests on worker threads and serializes engine use itself
+        self.db = sqlite3.connect(str(path), timeout=30, isolation_level=None, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=NORMAL")

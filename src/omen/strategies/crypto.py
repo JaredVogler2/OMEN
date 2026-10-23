@@ -152,6 +152,108 @@ class CryptoThresholdModel:
             return None
         return (m, side, p_cons, p_side_central, edge)
 
+    def ladder_view(self, asset: str, now: datetime) -> dict:
+        """Model band vs market quotes for the nearest-settling event of each series on ``asset`` (for charts).
+        Read-only: nothing is logged."""
+        self.engine.refresh_fees(now)
+        spot = self.feeds.spot(asset)
+        vol = self.feeds.vol(asset)
+        lo = now + timedelta(minutes=self.cfg.min_minutes_to_close)
+        out_series = []
+        for series, a in self.cfg.series.items():
+            if a != asset:
+                continue
+            by_event: dict[str, list[Market]] = defaultdict(list)
+            for m in self.client.iter_markets(series_ticker=series, status="open"):
+                if m.tradable and m.close_time > lo and interval_of(m) is not None:
+                    by_event[m.event_ticker].append(m)
+            if not by_event:
+                continue
+            event_ticker, markets = min(by_event.items(), key=lambda kv: kv[1][0].close_time)
+            close = markets[0].close_time
+            tau = (close - now).total_seconds() / SECONDS_PER_YEAR
+            rows = []
+            for m in markets:
+                iv = interval_of(m)
+                assert iv is not None
+                central, p_lo, p_hi = probability_band(iv, spot, vol, tau, self.cfg)
+                signal = None
+                try:
+                    fee = self.engine.fee_for(m)
+                except FeeUnavailable:
+                    fee = None
+                if fee is not None:
+                    best = None
+                    if m.has_yes_ask:
+                        cost = float(m.yes_ask + fee.taker_rate_per_contract(m.yes_ask))
+                        best = ("yes", p_lo - cost, p_lo, float(m.yes_ask))
+                    if m.has_yes_bid:
+                        price = ONE - m.yes_bid
+                        cost = float(price + fee.taker_rate_per_contract(price))
+                        cand = ("no", (1 - p_hi) - cost, 1 - p_hi, float(price))
+                        if best is None or cand[1] > best[1]:
+                            best = cand
+                    if best is not None:
+                        side, edge, p_cons, price = best
+                        would = (
+                            edge >= self.cfg.min_edge
+                            and price <= float(self.cfg.max_price)
+                            and p_cons >= self.cfg.min_conservative_probability
+                        )
+                        signal = {
+                            "side": side,
+                            "edge": round(edge, 4),
+                            "p_conservative": round(p_cons, 4),
+                            "would_alert": would,
+                        }
+                lo_k = float(iv.lo) if iv.lo is not None else None
+                hi_k = float(iv.hi) if iv.hi is not None else None
+                rows.append(
+                    {
+                        "ticker": m.ticker,
+                        "label": m.yes_sub_title,
+                        "interval": iv.describe(),
+                        "lo": lo_k,
+                        "hi": hi_k,
+                        "x": lo_k if lo_k is not None else hi_k,
+                        "yes_bid": float(m.yes_bid) if m.has_yes_bid else None,
+                        "yes_ask": float(m.yes_ask) if m.has_yes_ask else None,
+                        "p_central": round(central, 4),
+                        "p_low": round(p_lo, 4),
+                        "p_high": round(p_hi, 4),
+                        "signal": signal,
+                    }
+                )
+            rows.sort(key=lambda r: r["x"] if r["x"] is not None else 0.0)
+            kind = "range" if any(r["lo"] is not None and r["hi"] is not None for r in rows) else "threshold"
+            out_series.append(
+                {
+                    "series": series,
+                    "event_ticker": event_ticker,
+                    "close_time": close.isoformat(),
+                    "hours_to_close": round((close - now).total_seconds() / 3600, 2),
+                    "kind": kind,
+                    "title": markets[0].title,
+                    "markets": rows,
+                }
+            )
+        return {
+            "asset": asset,
+            "spot": spot.price,
+            "sources": spot.sources,
+            "dispersion_pct": round(spot.dispersion_pct, 4),
+            "vol": {"short": vol.short, "long": vol.long, "implied": vol.implied, "central": vol.central},
+            "settings": {
+                "min_edge": self.cfg.min_edge,
+                "min_conservative_probability": self.cfg.min_conservative_probability,
+                "vol_safety_multiplier": self.cfg.vol_safety_multiplier,
+                "spot_basis_band_pct": self.cfg.spot_basis_band_pct,
+                "student_t_dof": self.cfg.student_t_dof,
+            },
+            "series": out_series,
+            "as_of": now.isoformat(),
+        }
+
     def _log(self, m, now, side, central, p_cons, price, fee, edge, would, spot, vol, tau) -> None:
         last = self.ledger.last_prediction_ts(NAME, m.ticker)
         if would:

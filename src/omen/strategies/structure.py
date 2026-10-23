@@ -119,17 +119,22 @@ def underlying_key(m: Market) -> tuple:
     )
 
 
-def ladder_groups(markets: list[Market]) -> list[list[Market]]:
-    """Groups of 2+ tradable markets on one underlying with one-sided strikes of a single type, sorted by strike."""
-    groups: dict[tuple, list[Market]] = defaultdict(list)
+def ladder_groups(markets: list[Market]) -> list[list[tuple[Market, Interval]]]:
+    """Groups of 2+ tradable markets on one underlying with one-sided strikes of a single type, sorted by strike,
+    each paired with its (validated) interval."""
+    one_sided = UPPER_TYPES | LOWER_TYPES
+    groups: dict[tuple, list[tuple[Market, Interval]]] = defaultdict(list)
     for m in markets:
-        if m.strike_type in UPPER_TYPES | LOWER_TYPES and interval_of(m) is not None and m.rules_primary:
-            groups[underlying_key(m)].append(m)
+        if m.strike_type not in one_sided or not m.rules_primary:
+            continue
+        iv = interval_of(m)
+        if iv is not None:
+            groups[underlying_key(m)].append((m, iv))
     out = []
     for g in groups.values():
-        strikes = [_strike(m) for m in g]
+        strikes = [_strike(m) for m, _ in g]
         if len(g) >= 2 and len(set(strikes)) == len(strikes):  # duplicate strikes = ambiguous: skip the group
-            out.append(sorted(g, key=_strike))
+            out.append(sorted(g, key=lambda p: _strike(p[0])))
     return out
 
 
