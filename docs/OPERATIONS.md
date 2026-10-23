@@ -50,8 +50,17 @@ Measured from the build environment on 2026-10-23, through a shared and rate-lim
   halves it.
 * Kalshi rate limit: the Basic tier allows 20 reads per second. OMEN caps itself at 8 per second and averages under 1.
   It backs off on HTTP 429 and honors `Retry-After`.
-* CPU and memory: parsing about 35k markets takes a few seconds on a Pi 5. The resident set is a few hundred MB
-  during a full sweep.
+* CPU and memory: a full sweep of ~170k markets took 16 CPU-seconds and peaked at about 470 MB resident (measured;
+  markets keep only the fields OMEN uses). The service is capped at 900 MB, which leaves room for STONKS/APEX on
+  the same Pi: see [PI_HARDWARE.md](PI_HARDWARE.md) for sizing and the shopping list.
+* Hot sweeps ask Kalshi for open markets only (`status=open`). Without it, a 24-hour window paged through 64 pages of
+  mostly non-open markets instead of 5.
+
+## The website
+
+With `OMEN_WEB_URL` and `OMEN_INGEST_SECRET` set, `omen run` pushes a signed snapshot to the website after each
+cycle when the plays changed, and at least every 2 minutes. Failures are logged and retried with backoff; they
+never interrupt scanning or alerts. `omen doctor` checks the site, `omen publish` pushes once. See [WEB.md](WEB.md).
 
 ## Health and alerting about OMEN itself
 

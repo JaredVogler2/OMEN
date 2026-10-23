@@ -1,13 +1,19 @@
-"""Typed views over Kalshi API objects. Only the fields OMEN relies on are parsed; the raw dict is kept for audit."""
+"""Typed views over Kalshi API objects. Only the fields OMEN relies on are kept (a full sweep holds ~170k markets)."""
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+import sys
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 
 from omen.money import ONE, ZERO, PriceGrid, dec
+
+
+def _i(value: str | None) -> str:
+    """Intern a repeated string (titles, settlement boilerplate): a full sweep holds ~170k markets."""
+    return sys.intern(value) if value else ""
 
 
 def parse_ts(value: str | None) -> datetime | None:
@@ -30,7 +36,7 @@ class Series:
     def from_api(cls, d: dict) -> Series:
         return cls(
             ticker=d["ticker"],
-            title=d.get("title") or "",
+            title=_i(d.get("title")),
             category=d.get("category") or "",
             fee_type=d.get("fee_type") or "",
             fee_multiplier=dec(d.get("fee_multiplier"), Decimal(1)),
@@ -99,18 +105,17 @@ class Market:
     settlement_value: Decimal | None
     grid: PriceGrid
     market_type: str
-    raw: dict = field(repr=False, compare=False, default_factory=dict)
 
     @classmethod
     def from_api(cls, d: dict) -> Market:
         return cls(
             ticker=d["ticker"],
-            event_ticker=d.get("event_ticker") or "",
-            status=d.get("status") or "",
+            event_ticker=_i(d.get("event_ticker")),
+            status=_i(d.get("status")),
             title=d.get("title") or "",
             yes_sub_title=d.get("yes_sub_title") or d.get("subtitle") or "",
             rules_primary=d.get("rules_primary") or "",
-            rules_secondary=d.get("rules_secondary") or "",
+            rules_secondary=_i(d.get("rules_secondary")),
             strike_type=d.get("strike_type"),
             floor_strike=dec(d["floor_strike"]) if d.get("floor_strike") is not None else None,
             cap_strike=dec(d["cap_strike"]) if d.get("cap_strike") is not None else None,
@@ -131,7 +136,6 @@ class Market:
             settlement_value=dec(d["settlement_value_dollars"]) if d.get("settlement_value_dollars") else None,
             grid=PriceGrid.from_api(d.get("price_ranges")),
             market_type=d.get("market_type") or "binary",
-            raw=d,
         )
 
     @property

@@ -11,6 +11,8 @@ import sys
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import httpx
+
 from omen import __version__
 from omen.alerts.discord import DiscordConfigError, DiscordTransport, Notifier, build_routes, resolve
 from omen.alerts.render import notice_payload, play_text
@@ -21,6 +23,7 @@ from omen.http import HttpClient
 from omen.kalshi.client import KalshiClient
 from omen.ledger import Ledger
 from omen.money import usd
+from omen.publish import Publisher
 from omen.runner import InstanceLock, Runner, build_digest
 
 log = logging.getLogger("omen")
@@ -72,7 +75,8 @@ def build(s: Settings, *, dry_run: bool = False) -> tuple[Runner, Ledger]:
         s.paper.enabled = False
     models = _models(s, client, ledger, engine)
     executor = None if dry_run else _executor(s, ledger, notifier)
-    return Runner(s, engine, ledger, notifier, models=models, executor=executor), ledger
+    publisher = None if dry_run else Publisher.from_settings(s)
+    return Runner(s, engine, ledger, notifier, models=models, executor=executor, publisher=publisher), ledger
 
 
 # ---------------------------------------------------------------------------------------------------- commands
@@ -245,6 +249,21 @@ def cmd_doctor(s: Settings, args: argparse.Namespace) -> int:
             print(f"   note: {n.title}: {n.body}")
     except Exception as exc:
         check("kalshi api", False, str(exc))
+    if s.web_url:
+        try:
+            r = httpx.get(f"{s.web_url}/api/health", timeout=15)
+            info = r.json() if r.status_code == 200 else {}
+            check(
+                "website",
+                bool(info.get("ingest_enabled")),
+                f"{s.web_url} store={info.get('store')} ingest_enabled={info.get('ingest_enabled')}"
+                if info
+                else f"{s.web_url}/api/health -> HTTP {r.status_code}",
+            )
+        except (httpx.HTTPError, ValueError) as exc:
+            check("website", False, f"{s.web_url}: {exc}")
+    else:
+        check("website", True, "not configured (OMEN_WEB_URL unset): the site still works with on-demand scans")
     check("execution mode", True, s.execution.mode)
     if s.execution.mode != "off":
         check(
@@ -315,6 +334,35 @@ def cmd_backup(s: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_publish(s: Settings, args: argparse.Namespace) -> int:
+    """Push the live feed to the website once, now (setup check; the service publishes on its own)."""
+    publisher = Publisher.from_settings(s)
+    if publisher is None:
+        print("set OMEN_WEB_URL and OMEN_INGEST_SECRET (the same secret as in Vercel) first", file=sys.stderr)
+        return 2
+    runner, ledger = build(s)
+    runner.engine.refresh_fees(datetime.now(UTC))
+    from omen.snapshot import build_feed
+
+    feed = build_feed(ledger, runner.engine, runner.models, s, datetime.now(UTC))
+    if publisher.send(feed):
+        print(f"published {len(feed['plays'])} live plays to {s.web_url}")
+        return 0
+    print(f"publish failed: {publisher.last_error}", file=sys.stderr)
+    return 1
+
+
+def cmd_web(s: Settings, args: argparse.Namespace) -> int:
+    from omen.web.local import serve
+
+    if not os.environ.get("OMEN_WEB_PASSWORD"):
+        print("set OMEN_WEB_PASSWORD (8+ characters) first; the site asks for it", file=sys.stderr)
+        return 2
+    print(f"OMEN website on http://{args.host}:{args.port} (Ctrl+C to stop)")
+    serve(args.host, args.port)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="omen", description="High-confidence Kalshi scanner")
     p.add_argument("--config", help="TOML settings file (default config/omen.toml)")
@@ -361,6 +409,11 @@ def main(argv: list[str] | None = None) -> int:
     b = sub.add_parser("backup", help="consistent copy of the ledger")
     b.add_argument("dest")
     b.set_defaults(fn=cmd_backup)
+    sub.add_parser("publish", help="push the live feed to the website once (setup check)").set_defaults(fn=cmd_publish)
+    w = sub.add_parser("web", help="run the website locally (API + built frontend) for previews")
+    w.add_argument("--host", default="127.0.0.1")
+    w.add_argument("--port", type=int, default=8787)
+    w.set_defaults(fn=cmd_web)
 
     args = p.parse_args(argv)
     _setup_logging(args.verbose)

@@ -62,7 +62,7 @@ class HttpClient:
         base_url: str = "",
         rate_per_second: float = 8.0,
         timeout: float = 30.0,
-        max_retries: int = 6,
+        max_retries: int = 8,
         transport: httpx.BaseTransport | None = None,
         sleep: Callable[[float], None] = time.sleep,
         headers: dict[str, str] | None = None,
@@ -71,6 +71,8 @@ class HttpClient:
         self.max_retries = max_retries
         self.sleep = sleep
         self.limiter = RateLimiter(rate_per_second, sleep=sleep)
+        self.max_rate = rate_per_second
+        self._ok_streak = 0
         self.client = httpx.Client(
             timeout=timeout,
             transport=transport,
@@ -114,6 +116,10 @@ class HttpClient:
                     raise HttpError(f"{method} {url}: {exc}") from exc
                 self._backoff(attempt, None, f"network error: {exc}")
                 continue
+            if resp.status_code == 429:
+                self._slow_down()
+            elif resp.status_code < 400:
+                self._speed_up()
             if resp.status_code == 429 or resp.status_code >= 500:
                 retryable = method == "GET" or retry_on_post
                 if retryable and attempt <= self.max_retries:
@@ -122,6 +128,18 @@ class HttpClient:
             if resp.status_code >= 400:
                 raise HttpError(f"{method} {url} -> HTTP {resp.status_code}", resp.status_code, resp.text[:500])
             return resp
+
+    def _slow_down(self) -> None:
+        """Adaptive pacing: halve the request rate on every 429 (shared IPs, e.g. serverless, hit limits sooner)."""
+        self._ok_streak = 0
+        self.limiter.rate = max(1.0, self.limiter.rate / 2)
+
+    def _speed_up(self) -> None:
+        """...and win it back quickly once requests succeed again (x1.5 per 10 clean responses)."""
+        self._ok_streak += 1
+        if self._ok_streak >= 10 and self.limiter.rate < self.max_rate:
+            self._ok_streak = 0
+            self.limiter.rate = min(self.max_rate, self.limiter.rate * 1.5)
 
     def get_json(self, path: str, params: Any = None, **kw: Any) -> Any:
         return self.request("GET", path, params=params, **kw).json()
