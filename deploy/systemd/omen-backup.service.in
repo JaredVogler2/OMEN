@@ -1,0 +1,13 @@
+# Nightly consistent copy of the OMEN ledger (keeps 14). Rendered by scripts/install-pi.sh.
+[Unit]
+Description=OMEN nightly ledger backup
+
+[Service]
+Type=oneshot
+User=@USER@
+WorkingDirectory=@APP_DIR@
+EnvironmentFile=@ENV_FILE@
+Environment=OMEN_STATE_DIR=@STATE_DIR@ OMEN_PROJECT_ROOT=@APP_DIR@
+ExecStart=/bin/sh -c 'mkdir -p "@STATE_DIR@/backups" && @UV@ run --frozen --no-sync omen backup "@STATE_DIR@/backups/omen-$(date +%%Y%%m%%d).sqlite3" && ls -1t "@STATE_DIR@"/backups/omen-*.sqlite3 | tail -n +15 | xargs -r rm -f'
+Nice=15
+IOSchedulingClass=idle

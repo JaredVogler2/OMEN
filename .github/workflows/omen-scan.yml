@@ -1,0 +1,75 @@
+# OPTIONAL cloud fallback for the scanner. The primary runtime is the always-on Raspberry Pi (docs/OPERATIONS.md).
+#
+# OFF by default. Scheduled runs only do work when the repository variable OMEN_ACTIONS_SCAN is "true"
+# (Settings -> Secrets and variables -> Actions -> Variables). Otherwise the job is skipped, and skipped jobs use no
+# Actions minutes.
+#
+# Budget: GitHub Free gives 2,000 private-repo minutes a month, SHARED with STONKS2026 (which reserves about 1,100).
+# One full scan takes 3-5 billed minutes, so a 3-hour cadence is about 240-400 minutes a month. If OMEN is ever made
+# public, Actions minutes are free and the cron can be tightened (GitHub's minimum is 5 minutes, often delayed).
+# Set GitHub Billing -> Spending limit for Actions to $0 so nothing is ever charged.
+#
+# State (ledger: alerts already sent, paper positions, fee history, model predictions) is carried between runs with
+# actions/cache. Secrets come from the `omen` environment: OMEN_DISCORD_WEBHOOKS (or DISCORD_WEBHOOK_URL) and
+# optionally OMEN_HEALTHCHECK_URL. Execution is never enabled here.
+name: omen-scan
+
+on:
+  schedule:
+    - cron: "17 */3 * * *"
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: "hot (markets closing within 72h) or full (every open market)"
+        required: true
+        default: full
+        type: choice
+        options: [full, hot]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: omen-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    if: github.event_name == 'workflow_dispatch' || vars.OMEN_ACTIONS_SCAN == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: omen
+    env:
+      OMEN_STATE_DIR: ${{ github.workspace }}/.omen-state
+      OMEN_EXECUTION_MODE: "off"
+      TZ: UTC
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.11.32"
+          python-version: "3.11"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install (locked, runtime only)
+        run: uv sync --locked --no-dev
+      - name: Restore ledger
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .omen-state
+          key: omen-state-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: omen-state-
+      - name: Scan
+        env:
+          OMEN_DISCORD_WEBHOOKS: ${{ secrets.OMEN_DISCORD_WEBHOOKS }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          OMEN_HEALTHCHECK_URL: ${{ secrets.OMEN_HEALTHCHECK_URL }}
+        run: uv run omen once --kind "${{ inputs.kind || 'full' }}"
+      - name: Save ledger
+        if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .omen-state
+          key: omen-state-${{ github.run_id }}-${{ github.run_attempt }}

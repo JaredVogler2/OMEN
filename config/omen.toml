@@ -1,0 +1,87 @@
+# OMEN settings. Every key is optional (code defaults shown); unknown keys are rejected so typos fail loudly.
+# Secrets (Discord webhooks / bot token, Kalshi API key) live in the environment, never here. See .env.example.
+
+[scan]
+hot_interval_seconds = 300        # markets closing within hot_horizon_hours: re-priced every 5 minutes
+hot_horizon_hours = 72
+full_interval_seconds = 3600      # every open market (~170k, ~175 requests): hourly
+events_refresh_seconds = 1800     # incremental event metadata (mutually-exclusive flags) via min_updated_ts
+series_refresh_seconds = 21600    # fee type + multiplier of every series (one request)
+fee_changes_refresh_seconds = 1800  # scheduled series fee changes and per-event fee overrides
+settle_interval_seconds = 1800    # settle paper positions and model predictions from official results
+model_interval_seconds = 60       # crypto model fast lane
+max_requests_per_second = 8.0     # Kalshi Basic tier allows 20/s; stay well under it
+min_minutes_to_close = 3          # ignore markets about to close (no time to execute)
+request_timeout_seconds = 30.0
+
+[lock]
+# Structural (guaranteed-by-contract) plays. All money values are after every fee.
+min_profit_usd = "1.00"           # guaranteed profit floor per play
+min_return_pct = "0.75"           # guaranteed profit / capital
+min_apr_pct = "15"                # annualized; filters plays that lock capital for months for pennies
+max_capital_usd = "1000"          # sizing cap per play (the alert shows the size the book supports up to this)
+max_contracts_per_leg = "5000"
+max_plausible_return_pct = "20"   # above this a "lock" is sent to #kalshi-status for a manual rules check instead
+whole_contracts = true            # Kalshi accepts 0.01-contract fractions; whole contracts are simpler to trade
+enable_no_basket = true
+enable_ladder = true
+enable_yes_partition = true
+allow_step_gap_partitions = true  # buckets like "59-60" / "61-62" rely on whole-unit reporting
+
+[fees]
+rounding_increment = "0.01"       # round each fill's fee UP to this (cent = conservative; direct members: 0.0001)
+schedule_file = "config/fee_schedule.toml"
+change_guard_minutes = 60         # within this window of a scheduled fee change, use the more expensive terms
+verify_reminder_days = 30
+
+[crypto]
+enabled = true
+min_minutes_to_close = 5
+max_hours_to_close = 36
+vol_safety_multiplier = 1.30
+vol_floor_annual = 0.25
+student_t_dof = 4.0
+spot_basis_band_pct = 0.15
+max_spot_age_seconds = 30
+min_edge = 0.03                   # conservative probability must beat price + fee by 3 points
+min_conservative_probability = 0.85  # favorites only: worst-case win probability of the bought side
+max_price = "0.985"
+max_capital_usd = "200"
+prediction_log_interval_minutes = 360  # calibration sample per market (alerts are always logged)
+
+[crypto.series]
+KXBTCD = "BTC"
+KXBTC = "BTC"
+KXETHD = "ETH"
+KXETH = "ETH"
+KXSOLD = "SOL"
+KXSOLE = "SOL"
+KXXRPD = "XRP"
+KXDOGED = "DOGE"
+
+[gates]
+# A model's plays reach #kalshi-plays only after these pass on resolved shadow data AND `omen promote` is run.
+min_resolved_signals = 150
+min_distinct_events = 30
+min_after_fee_roi_lower_bound = 0.0
+bootstrap_confidence = 0.95
+max_calibration_error = 0.05
+bootstrap_samples = 2000
+
+[alerts]
+cooldown_minutes = 60             # re-alert a live play only after this long...
+improvement_pct = "25"            # ...and only if its profit improved this much
+post_gone_updates = true          # edit the alert to GONE when the play disappears
+digest_hour_et = 20               # daily digest to #kalshi-status at 8 pm New York time
+max_alerts_per_cycle = 10
+max_research_alerts_per_hour = 12  # shadow-model signals
+
+[paper]
+enabled = true                    # record every alerted play at its verified prices and settle it
+
+[execution]
+mode = "off"                      # off | demo | live  (live also needs OMEN_LIVE_ACK)
+max_cost_per_play_usd = "50"
+max_daily_cost_usd = "200"
+allow_models = false
+kill_switch_file = "KILL"         # create <state_dir>/KILL to stop all execution immediately
