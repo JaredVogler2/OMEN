@@ -14,7 +14,7 @@ from omen.http import HttpError
 from omen.kalshi.client import KalshiClient
 from omen.kalshi.models import Market, OrderBook
 from omen.ledger import Ledger
-from omen.liquidity.maker import Fill, Quote, QuotePolicy, Venue, levels
+from omen.liquidity.maker import Fill, Quote, QuotePolicy, Venue, dead_side_quote, levels
 from omen.liquidity.programs import Program, eligible, fetch_active, series_of
 from omen.liquidity.scoring import snapshot
 
@@ -67,6 +67,7 @@ class LiquidityService:
         self.clock = clock
         self.policy = policy_from(settings)
         self.programs: list[Program] = []
+        self.dead_programs: list[Program] = []
         self.markets: dict[str, Market] = {}
         self.books: dict[str, OrderBook] = {}
         self._refreshed: datetime | None = None
@@ -105,7 +106,7 @@ class LiquidityService:
         if self._refreshed is None or now - self._refreshed >= REFRESH:
             self._refresh(now)
         held = self.ledger.lp_positions(self.mode)
-        tickers = sorted({p.ticker for p in self.programs} | set(held))
+        tickers = sorted({p.ticker for p in self.programs} | {p.ticker for p in self.dead_programs} | set(held))
         self.books = self.client.orderbooks(tickers) if tickers else {}
         tape = self._tape(now) if self.mode == "paper" else []
         fills = self.venue.fills(tape, now)
@@ -152,8 +153,21 @@ class LiquidityService:
             min_time_left=timedelta(minutes=10),
             limit=self.cfg.max_markets,
         )
+        self.dead_programs = (
+            eligible(
+                active,
+                now,
+                min_hours=self.cfg.min_program_hours,
+                min_reward_per_day=self.cfg.min_reward_per_day_usd,
+                exclude=self.cfg.dead_side_exclude_series,
+                min_time_left=timedelta(minutes=10),
+                limit=10 * self.cfg.max_markets,
+            )
+            if self.cfg.complete_dead_sides
+            else []
+        )
         held = set(self.ledger.lp_positions(self.mode))
-        tickers = sorted({p.ticker for p in self.programs} | held)
+        tickers = sorted({p.ticker for p in self.programs} | {p.ticker for p in self.dead_programs} | held)
         self.markets = {m.ticker: m for m in self.client.markets_by_ticker(tickers)} if tickers else {}
         self._refreshed = now
 
@@ -182,19 +196,40 @@ class LiquidityService:
     def _desired(self, now: datetime, held: dict[str, dict[str, list[float]]]) -> list[Quote]:
         """Quotes for every eligible market, the best reward per dollar first, until the capital budget is used."""
         stop = timedelta(minutes=self.cfg.stop_before_close_minutes)
-        candidates: list[tuple[float, Quote]] = []
-        for p in self.programs:
+        best: dict[tuple[str, str], tuple[float, Quote]] = {}
+
+        def usable(p: Program) -> OrderBook | None:
             m = self.markets.get(p.ticker)
             book = self.books.get(p.ticker)
             if m is None or book is None or not m.tradable:
-                continue
+                return None
             if m.close_time is not None and m.close_time - now < stop:
+                return None
+            return book
+
+        for p in self.programs:
+            book = usable(p)
+            if book is None:
                 continue
             cost = {side: v[1] for side, v in held.get(p.ticker, {}).items()}
             for q in self.policy.quotes(book, cost):
                 rate = reward_rate(p, book, {q.side: (q.price, q.size)})
-                candidates.append((rate / max(q.price * q.size, 1e-9), q))
-        candidates.sort(key=lambda c: -c[0])
+                if rate * 86400 / q.size < self.cfg.min_reward_per_contract_day:
+                    continue  # the reward would not cover what fills cost on average
+                best[(q.ticker, q.side)] = (rate / max(q.price * q.size, 1e-9), q)
+        for p in self.dead_programs:
+            book = usable(p)
+            if book is None:
+                continue
+            cost = {side: v[1] for side, v in held.get(p.ticker, {}).items()}
+            q = dead_side_quote(book, p.target, p.discount, cost, self.cfg.dead_side_max_loss_usd)
+            if q is None:
+                continue
+            rate = reward_rate(p, book, {q.side: (q.price, q.size)})
+            score = rate / max(q.price * q.size, 1e-9)
+            if rate > 0 and score > best.get((q.ticker, q.side), (0.0, q))[0]:
+                best[(q.ticker, q.side)] = (score, q)
+        candidates = sorted(best.values(), key=lambda c: -c[0])
         budget = self.cfg.max_total_capital_usd - sum(v[1] for sides in held.values() for v in sides.values())
         # one series (often one news event or one settlement) may not take more than its share of the capital
         series_cap = self.cfg.max_total_capital_usd * self.cfg.max_series_share
@@ -220,7 +255,7 @@ class LiquidityService:
         by_ticker: dict[str, dict[str, tuple[float, float]]] = {}
         for o in self.venue.orders.values():
             by_ticker.setdefault(o.ticker, {})[o.side] = (o.price, o.size)
-        programs = {p.ticker: p for p in self.programs}
+        programs = {p.ticker: p for p in [*self.dead_programs, *self.programs]}
         for ticker, ours in by_ticker.items():
             p, book = programs.get(ticker), self.books.get(ticker)
             if p is not None and book is not None:

@@ -117,5 +117,12 @@ min_reward_per_day_usd = 5.0
 min_program_hours = 12.0          # 15-minute and hourly programs lost more to fills than they paid in the backtest
 stop_before_close_minutes = 720   # cheap-side fills in the last 12 h before close lost ~7c/contract; earlier ones marked out +2c
 # series where resting orders were picked off in the backtest (fast prices, scheduled data, live sports)
-exclude_series = '15M$|^KXTEMP\w*H$|RATEH$|^KXAAAGAS|^KXDIESEL|MATCH$|^KXCRYPTOLEAD|GAME$|SPREAD|TOTAL'
+exclude_series = '15M$|^KXTEMP\w*H$|RATEH$|^KXAAAGAS|^KXDIESEL|MATCH$|^KXCRYPTOLEAD|GAME$|SPREAD|TOTAL|MENTION|SAY|TRUTHSOCIAL|ELIMINATION|^KXVMA|NETFLIX'
+# only quote where the formula reward is at least this many dollars per contract per day (fills cost ~0-2c)
+min_reward_per_contract_day = 0.02
+# 1c bids that complete the empty side of decided markets (rewards pay only when both sides reach the target)
+complete_dead_sides = true
+dead_side_max_loss_usd = 50.0     # per market: at most 5,000 contracts filled at 1c
+dead_side_exclude_series = '15M$|^KXTEMP\w*H$|RATEH$|^KXCRYPTOLEAD'
+
 summary_every_hours = 6
