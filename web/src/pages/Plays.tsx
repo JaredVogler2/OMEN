@@ -269,7 +269,7 @@ export default function Plays({
   );
 }
 
-const STRUCT: Record<string, string> = { no_basket: "NO basket", yes_partition: "YES basket", ladder: "Ladder" };
+const STRUCT: Record<string, string> = { no_basket: "NO basket", yes_partition: "YES basket", ladder: "Ladder", cover: "Cross-series" };
 
 function ActivityFeed({ items, now }: { items: Activity[]; now: number }) {
   return (

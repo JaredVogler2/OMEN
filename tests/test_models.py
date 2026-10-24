@@ -119,3 +119,11 @@ def test_gates_fail_on_losing_record():
 def test_ece():
     assert expected_calibration_error([(0.9, 1.0)] * 9 + [(0.9, 0.0)]) == pytest.approx(0.0)
     assert expected_calibration_error([(0.9, 0.0)] * 10) == pytest.approx(0.9)
+
+
+def test_signals_carry_the_measured_win_rate_of_their_confidence_level():
+    from omen.strategies.crypto import historical_win_rate
+
+    assert historical_win_rate(0.40) is None
+    assert historical_win_rate(0.87) == 0.951  # a "worst case 85-90%" favorite won 95.1% in the replay
+    assert historical_win_rate(0.999) == 0.971

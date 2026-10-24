@@ -20,6 +20,7 @@ type Horizon = (typeof HORIZONS)[number]["value"];
 const STRATEGIES = [
   { id: "no_basket", name: "NO basket", hint: "Buy NO on every outcome of a mutually exclusive event" },
   { id: "yes_partition", name: "YES basket", hint: "Buy YES on buckets that provably cover every outcome" },
+  { id: "cover", name: "Cross-series lock", hint: "Thresholds and buckets from different series that settle on the same number" },
   { id: "ladder", name: "Ladder", hint: "Sell the narrower strike, buy the wider one that must also pay" },
 ];
 
@@ -318,7 +319,7 @@ function Results({ result, onOpen, fresh }: { result: ScanResult; onOpen: (p: Pl
                   </a>
                   <div className="mono truncate text-[10px] text-muted">{n.detail ?? n.event_ticker}</div>
                 </div>
-                <span className="shrink-0 text-xs text-ink-2">{{ no_basket: "NO basket", yes_partition: "YES basket", ladder: "Ladder" }[n.strategy] ?? n.strategy}</span>
+                <span className="shrink-0 text-xs text-ink-2">{{ no_basket: "NO basket", yes_partition: "YES basket", ladder: "Ladder", cover: "Cross-series" }[n.strategy] ?? n.strategy}</span>
                 <span className={cx("num w-16 shrink-0 text-right text-[13px] font-medium", n.edge >= 0 ? "text-lock" : "text-ink-2")}>
                   {n.edge >= 0 ? "+" : "−"}
                   {Math.abs(n.edge * 100).toFixed(1)}¢

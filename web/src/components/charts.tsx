@@ -443,3 +443,81 @@ export function Sparkline({ values, color = "var(--s1)", height = 28 }: { values
     </div>
   );
 }
+
+// ------------------------------------------------------------------------------------------- interval (forest)
+export interface IntervalRow {
+  key: string;
+  label: string;
+  mid: number;
+  lo: number;
+  hi: number;
+  second?: number | null; // e.g. the held-out estimate
+  highlight?: boolean;
+  detail: ReactNode;
+}
+
+/** Estimates with 95% intervals per category on a shared value axis, a zero reference, and an optional second
+ * point per row (hollow) for a comparison estimate. Values are in the caller's unit (cents here). */
+export function IntervalChart({
+  rows,
+  height = 260,
+  format,
+  label,
+}: {
+  rows: IntervalRow[];
+  height?: number;
+  format: (v: number) => string;
+  label: string;
+}) {
+  const [ref, width] = useWidth<HTMLDivElement>();
+  const [hover, setHover] = useState<number | null>(null);
+  const m = { l: 44, r: 12, t: 12, b: 34 };
+  const iw = Math.max(10, width - m.l - m.r);
+  const ih = height - m.t - m.b;
+  const vals = rows.flatMap((r) => [r.lo, r.hi, r.second ?? r.mid, 0]);
+  const ticks = niceTicks(Math.min(...vals), Math.max(...vals), 5);
+  const lo = Math.min(...vals, ticks[0] ?? 0);
+  const hi = Math.max(...vals, ticks[ticks.length - 1] ?? 0);
+  const sy = (v: number) => (hi === lo ? ih / 2 : ih - ((v - lo) / (hi - lo)) * ih);
+  const bw = rows.length ? iw / rows.length : iw;
+  const cxOf = (i: number) => bw * i + bw / 2;
+  const h = hover != null ? rows[hover] : null;
+  return (
+    <div ref={ref} className="relative w-full" style={{ height }}>
+      {width > 0 && rows.length > 0 && (
+        <svg width={width} height={height} role="img" aria-label={label}>
+          <g transform={`translate(${m.l},${m.t})`}>
+            {ticks.map((v) => (
+              <g key={v}>
+                <line x1={0} x2={iw} y1={sy(v)} y2={sy(v)} stroke="var(--grid)" strokeWidth={1} />
+                <text x={-8} y={sy(v)} dy="0.32em" textAnchor="end" className="num fill-muted text-[10px]">
+                  {format(v)}
+                </text>
+              </g>
+            ))}
+            <line x1={0} x2={iw} y1={sy(0)} y2={sy(0)} stroke="var(--text-2)" strokeWidth={1} />
+            {hover != null && <rect x={bw * hover} width={bw} height={ih} fill="var(--surface-2)" />}
+            {rows.map((r, i) => (
+              <g key={r.key}>
+                <line x1={cxOf(i)} x2={cxOf(i)} y1={sy(r.hi)} y2={sy(r.lo)} stroke="var(--s1)" strokeWidth={2} strokeLinecap="round" />
+                <circle cx={cxOf(i)} cy={sy(r.mid)} r={r.highlight ? 6 : 4.5} fill="var(--s1)" stroke="var(--surface)" strokeWidth={2} />
+                {r.second != null && (
+                  <circle cx={cxOf(i) + Math.min(14, bw * 0.25)} cy={sy(r.second)} r={4.5} fill="var(--surface)" stroke="var(--s2)" strokeWidth={2} />
+                )}
+                <text x={cxOf(i)} y={ih + 16} textAnchor="middle" className="num fill-muted text-[10px]">
+                  {r.label}
+                </text>
+                <rect x={bw * i} width={bw} height={ih} fill="transparent" onPointerEnter={() => setHover(i)} onPointerLeave={() => setHover(null)} />
+              </g>
+            ))}
+          </g>
+        </svg>
+      )}
+      {h && hover != null && (
+        <Tooltip x={m.l + cxOf(hover)} y={m.t + sy(h.hi)} width={width}>
+          {h.detail}
+        </Tooltip>
+      )}
+    </div>
+  );
+}

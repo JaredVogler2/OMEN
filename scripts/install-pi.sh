@@ -3,6 +3,7 @@
 #
 #   scripts/install-pi.sh                     # install/update, enable and start
 #   scripts/install-pi.sh --with-backup-timer # also a nightly ledger backup
+#   scripts/install-pi.sh --with-atlas-timer  # also a weekly calibration-atlas rebuild (feeds calibration edges)
 #   scripts/install-pi.sh --with-exec         # also install the signing extra (only for demo/live execution)
 #   scripts/install-pi.sh --no-start          # render and enable, but do not (re)start
 #
@@ -15,15 +16,17 @@ RUN_HOME="$(getent passwd "$RUN_USER" | cut -d: -f6)"
 STATE_DIR="${OMEN_STATE_DIR:-$RUN_HOME/.omen}"
 ENV_FILE="${OMEN_ENV_FILE:-$RUN_HOME/.config/omen/omen.env}"
 BACKUP=0
+ATLAS=0
 EXEC=0
 START=1
 
 for arg in "$@"; do
   case "$arg" in
     --with-backup-timer) BACKUP=1 ;;
+    --with-atlas-timer) ATLAS=1 ;;
     --with-exec) EXEC=1 ;;
     --no-start) START=0 ;;
-    -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -63,9 +66,14 @@ if [ "$BACKUP" = 1 ]; then
   render deploy/systemd/omen-backup.service.in | sudo tee /etc/systemd/system/omen-backup.service >/dev/null
   sudo install -m 644 deploy/systemd/omen-backup.timer /etc/systemd/system/omen-backup.timer
 fi
+if [ "$ATLAS" = 1 ]; then
+  render deploy/systemd/omen-atlas.service.in | sudo tee /etc/systemd/system/omen-atlas.service >/dev/null
+  sudo install -m 644 deploy/systemd/omen-atlas.timer /etc/systemd/system/omen-atlas.timer
+fi
 sudo systemctl daemon-reload
 sudo systemctl enable omen.service >/dev/null
 [ "$BACKUP" = 1 ] && sudo systemctl enable --now omen-backup.timer >/dev/null
+[ "$ATLAS" = 1 ] && sudo systemctl enable --now omen-atlas.timer >/dev/null
 
 echo "== doctor"
 set +e

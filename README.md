@@ -26,11 +26,21 @@ LOCK strategies ([docs/STRATEGIES.md](docs/STRATEGIES.md)):
   pays at least 1 in every outcome. When the market prices A above B by more than fees, that is a lock.
 * **YES basket.** If an event's buckets provably cover every outcome, YES on all of them pays 1. This is used only
   when the rules have no "everything resolves NO" or "last fair price" clause.
+* **Cross-series lock.** When different series settle on the same number (SOL "above $X" thresholds next to SOL
+  "$X to $Y" buckets), the cheapest mix of YES and NO positions that covers every possible value pays at least 1.
+  OMEN finds it as a shortest path over the strikes.
 
-MODEL strategy: **crypto threshold**. This covers the BTC/ETH/SOL/XRP/DOGE price markets that settle on CF Benchmarks
-indices. Spot is the median of Coinbase, Kraken and Bitstamp. Volatility comes from realized and Deribit implied
-estimates. The model takes the worst case over the volatility range, normal versus fat tails, and a spot-basis band.
-It only considers favorites, where the worst-case win probability is at least 85%.
+MODEL strategies (shadow until validated):
+
+* **Calibration edges.** `omen atlas` measures, from Kalshi's settled markets, where prices have actually been wrong
+  after fees, by category × time-to-close × price band. Edges must hold on held-out weeks. Live markets in a
+  validated edge get a quantified confidence: estimated true win probability, P(edge > 0), expected value, payout
+  multiple and a ¼-Kelly stake. The first atlas found no validated edge, and the website's Edges page shows why.
+* **Crypto threshold.** This covers the BTC/ETH/SOL/XRP/DOGE price markets that settle on CF Benchmarks
+  indices. Spot is the median of Coinbase, Kraken and Bitstamp. Volatility comes from realized and Deribit implied
+  estimates. The model takes the worst case over the volatility range, normal versus fat tails, and a spot-basis
+  band. It only considers favorites, where the worst-case win probability is at least 85%. Replayed over two
+  years, that worst case is conservative: favorites it put at 85–90% won 95.1% of the time.
 
 Strictness is the point. On 2026-10-23 a naive scan of a live snapshot found **37,960** "ladder arbitrages". All but one
 were false: they paired different players or opposite teams. The single real one offered 0.01 contracts. OMEN treats
@@ -102,6 +112,7 @@ shared secret); the site never holds Kalshi keys or places orders. Setup takes a
 | `omen show <id>` | The full record of an alerted play (the id is in the alert footer). |
 | `omen promote crypto_threshold [--state shadow]` | Moves a model to live once its gates pass, or demotes it. |
 | `omen doctor` / `omen discord-test` / `omen digest` / `omen backup <file>` | Operations. |
+| `omen atlas [--days 45]` | Rebuilds the calibration atlas (where Kalshi was wrong after fees). Weekly with `install-pi.sh --with-atlas-timer`. |
 | `omen publish` | Pushes the live feed to the website once (setup check; `omen run` publishes on its own). |
 | `omen web` | Runs the website locally (API + built frontend) for previews. |
 
@@ -117,7 +128,7 @@ shared secret); the site never holds Kalshi keys or places orders. Setup takes a
 
 ## Status and honesty
 
-* Tested: 93 unit and end-to-end tests. They cover fee math against Kalshi's published examples, structural traps
+* Tested: 112 unit and end-to-end tests. They cover fee math against Kalshi's published examples, structural traps
   (opposite-team spreads, holes in partitions, fair-price clauses), a fake-exchange pipeline (alert → GONE edit →
   settlement → fee-change notice) and the website API (auth, signed ingest, streamed scans, budgets). Read-only scans
   against the live Kalshi API ran from the build environment. The latest full scan (2026-10-23) covered 169,024

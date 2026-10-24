@@ -363,6 +363,7 @@ export const api = {
     json<{ series: SeriesHit[] }>("GET", `/api/series?q=${encodeURIComponent(q)}`, undefined, signal),
   crypto: (asset: string, signal?: AbortSignal) =>
     json<CryptoView>("GET", `/api/crypto?asset=${encodeURIComponent(asset)}`, undefined, signal),
+  atlas: (signal?: AbortSignal) => json<Atlas>("GET", "/api/atlas", undefined, signal),
 
   /** Streams NDJSON scan events; resolves when the stream ends. */
   async scan(params: Omit<Partial<ScanParams>, "horizon_hours"> & { horizon_hours?: number | "all" | null }, onEvent: (e: ScanEvent) => void, signal?: AbortSignal) {
@@ -385,3 +386,37 @@ export const api = {
     if (buf.trim()) onEvent(JSON.parse(buf) as ScanEvent);
   },
 };
+
+export interface CellStats {
+  n: number;
+  series: number;
+  win_rate: number;
+  avg_price: number;
+  ev: number;
+  ev_lo: number;
+  ev_hi: number;
+  excess: number;
+}
+
+export interface AtlasCell {
+  category: string;
+  horizon: "1h" | "6h" | "24h" | "72h";
+  band: [number, number];
+  discovery: CellStats;
+  validation: CellStats | null;
+  edge: boolean;
+}
+
+export interface Atlas {
+  version: 1;
+  generated_at?: string;
+  markets: number;
+  series?: number;
+  observations?: number;
+  validation_from?: string | null;
+  cells: AtlasCell[];
+  overall: AtlasCell[];
+  edges: AtlasCell[];
+  source: "pi" | "repository" | "none";
+}
+

@@ -49,6 +49,7 @@ class LockSettings:
     enable_no_basket: bool = True
     enable_ladder: bool = True
     enable_yes_partition: bool = True
+    enable_cover: bool = True  # cross-series covers: thresholds + buckets settling on the same number
     # Buckets reported in steps ("59-60", "61-62" whole degrees; "84,999.99"/"85,000" cents) leave one-step gaps.
     allow_step_gap_partitions: bool = True
 
@@ -99,6 +100,22 @@ class CryptoModelSettings:
 
 
 @dataclass
+class EdgeSettings:
+    """Calibration edges: live markets in a price band where the atlas found Kalshi wrong after fees (and the
+    newest weeks, unseen by the search, agreed). Dormant until an atlas with validated edges exists."""
+
+    enabled: bool = True
+    atlas_path: str = ""  # default <state_dir>/atlas.json, rebuilt by `omen atlas`
+    max_atlas_age_days: int = 21  # an older atlas is ignored: markets change
+    prior_sd: float = 0.03  # skepticism: true mispricings are usually small, so measured ones are shrunk toward 0
+    min_confidence: float = 0.90  # P(after-fee edge > 0)
+    min_ev: float = 0.01  # dollars per contract after fees
+    kelly_fraction: float = 0.25  # stake = this x full Kelly x bankroll
+    bankroll_usd: Decimal = Decimal("1000")
+    max_capital_usd: Decimal = Decimal("200")
+
+
+@dataclass
 class ValidationGates:
     """A model's alerts reach #kalshi-plays only after its shadow record clears every gate and the owner promotes it."""
 
@@ -140,6 +157,7 @@ class Settings:
     lock: LockSettings = field(default_factory=LockSettings)
     fees: FeeSettings = field(default_factory=FeeSettings)
     crypto: CryptoModelSettings = field(default_factory=CryptoModelSettings)
+    edge: EdgeSettings = field(default_factory=EdgeSettings)
     gates: ValidationGates = field(default_factory=ValidationGates)
     alerts: AlertSettings = field(default_factory=AlertSettings)
     paper: PaperSettings = field(default_factory=PaperSettings)
@@ -168,6 +186,7 @@ class Settings:
 
 
 SECTIONS = {
+    "edge": EdgeSettings,
     "scan": ScanSettings,
     "lock": LockSettings,
     "fees": FeeSettings,

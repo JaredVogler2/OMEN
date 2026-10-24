@@ -22,7 +22,9 @@ STRATEGY_NAMES = {
     "no_basket": "NO basket",
     "ladder": "Ladder",
     "yes_partition": "YES basket",
+    "cover": "Cross-series lock",
     "crypto_threshold": "Crypto model",
+    "calibration_edge": "Calibration edge",
 }
 
 

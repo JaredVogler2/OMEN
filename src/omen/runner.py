@@ -33,7 +33,7 @@ from omen.watchdog import check_fee_document
 
 log = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
-LOCK_STRATEGIES = {"no_basket", "ladder", "yes_partition"}
+LOCK_STRATEGIES = {"no_basket", "ladder", "yes_partition", "cover"}
 
 
 class ModelStrategy(Protocol):
@@ -272,6 +272,7 @@ class Runner:
             return
         try:
             self.publisher.maybe_publish(self.ledger, self.engine, self.models, self.s, self.clock())
+            self.publisher.maybe_publish_atlas(self.s.state_dir / "atlas.json")
         except Exception:
             log.exception("website publish failed")
 

@@ -36,6 +36,20 @@ log = logging.getLogger(__name__)
 NAME = "crypto_threshold"
 SECONDS_PER_YEAR = 365.25 * 24 * 3600
 
+# How often the favorite actually won, by the worst-case probability the model relies on: probability_band()
+# replayed over 2024-10..2026-10 hourly BTC/ETH/SOL prices (138,384 evaluations; 6 h and 24 h horizons; strikes at
+# +-0.5..2 sd; realized vol only). The worst case is deliberately conservative: when it said 85-90% the favorite won
+# 95.1% of the time. Shown on every signal so its confidence is a measured number, not just a bound.
+HISTORICAL_WIN_RATE = ((0.50, 0.743), (0.70, 0.871), (0.80, 0.939), (0.85, 0.951), (0.90, 0.967), (0.95, 0.971))
+
+
+def historical_win_rate(p_conservative: float) -> float | None:
+    rate = None
+    for floor, won in HISTORICAL_WIN_RATE:
+        if p_conservative >= floor:
+            rate = won
+    return rate
+
 
 def prob_in_interval(iv: Interval, spot: float, sigma: float, tau_years: float, nu: float) -> float:
     """P(settlement in ``iv``); log returns are Student-t(``nu``) or normal (nu = inf) with sd sigma*sqrt(tau)."""
@@ -353,6 +367,14 @@ class CryptoThresholdModel:
                         f"{self.cfg.spot_basis_band_pct:g}% spot basis band.",
                         f"Conservative edge after fees ≥ {self.cfg.min_edge:.0%} per contract; worst-case win "
                         f"probability ≥ {self.cfg.min_conservative_probability:.0%}.",
+                        *(
+                            [
+                                f"Track record of this confidence level: over two years of replayed prices, favorites "
+                                f"at a {p_cons:.0%} worst case won {hist:.1%} of the time."
+                            ]
+                            if (hist := historical_win_rate(p_cons)) is not None
+                            else []
+                        ),
                     ],
                     risks=[
                         "Model risk: crypto can gap on news faster than any volatility estimate.",

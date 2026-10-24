@@ -50,11 +50,16 @@ def _notifier(s: Settings, ledger: Ledger, dry_run: bool = False) -> Notifier:
 
 
 def _models(s: Settings, client: KalshiClient, ledger: Ledger, engine: Engine) -> list:
-    if not s.crypto.enabled:
-        return []
-    from omen.strategies.crypto import CryptoThresholdModel
+    models: list = []
+    if s.crypto.enabled:
+        from omen.strategies.crypto import CryptoThresholdModel
 
-    return [CryptoThresholdModel(s, client, ledger, engine)]
+        models.append(CryptoThresholdModel(s, client, ledger, engine))
+    if s.edge.enabled:
+        from omen.strategies.edge import CalibrationEdgeModel
+
+        models.append(CalibrationEdgeModel(s, client, ledger, engine))  # dormant without a validated atlas
+    return models
 
 
 def _executor(s: Settings, ledger: Ledger, notifier: Notifier):
@@ -334,6 +339,30 @@ def cmd_backup(s: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_atlas(s: Settings, args: argparse.Namespace) -> int:
+    """Rebuild the calibration atlas from Kalshi's settled markets (public data; ~30-60 min under rate limits)."""
+    from omen import atlas
+
+    http = HttpClient(s.base_url, rate_per_second=s.scan.max_requests_per_second / 2, timeout=40, max_retries=10)
+    series = {x.ticker: x.category for x in KalshiClient(http).all_series()}
+    doc = atlas.run(http, series, days=args.days, progress=lambda msg: print(msg, flush=True))
+    out = args.out or str(s.state_dir / "atlas.json")
+    with open(out, "w") as fh:
+        json.dump(doc, fh, indent=1)
+    print(
+        f"atlas: {doc['markets']} markets, {doc['series']} series, {len(doc['cells'])} cells, "
+        f"{len(doc['edges'])} validated edges -> {out}"
+    )
+    for e in doc["edges"]:
+        d, v = e["discovery"], e["validation"]
+        print(
+            f"  EDGE {e['category']:13s} {e['horizon']:>3s} {e['band'][0] * 100:>4.0f}-{e['band'][1] * 100:<3.0f}c  "
+            f"EV {d['ev'] * 100:+.2f}c [{d['ev_lo'] * 100:+.2f}, {d['ev_hi'] * 100:+.2f}] n={d['n']} "
+            f"validation EV {v['ev'] * 100:+.2f}c n={v['n']}"
+        )
+    return 0
+
+
 def cmd_publish(s: Settings, args: argparse.Namespace) -> int:
     """Push the live feed to the website once, now (setup check; the service publishes on its own)."""
     publisher = Publisher.from_settings(s)
@@ -409,6 +438,10 @@ def main(argv: list[str] | None = None) -> int:
     b = sub.add_parser("backup", help="consistent copy of the ledger")
     b.add_argument("dest")
     b.set_defaults(fn=cmd_backup)
+    at = sub.add_parser("atlas", help="rebuild the calibration atlas (where Kalshi prices were wrong after fees)")
+    at.add_argument("--days", type=int, default=45)
+    at.add_argument("--out", help="output file (default ~/.omen/atlas.json)")
+    at.set_defaults(fn=cmd_atlas)
     sub.add_parser("publish", help="push the live feed to the website once (setup check)").set_defaults(fn=cmd_publish)
     w = sub.add_parser("web", help="run the website locally (API + built frontend) for previews")
     w.add_argument("--host", default="127.0.0.1")

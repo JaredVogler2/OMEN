@@ -1,4 +1,4 @@
-import { Bitcoin, ChartLine, LogOut, Moon, Radar, Receipt, ScanSearch, Server, Sun } from "lucide-react";
+import { Bitcoin, ChartLine, LogOut, Moon, Radar, Receipt, ScanSearch, Server, Sun, Target } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { type Dashboard, api, onUnauthorized } from "./api";
 import { Logo } from "./components/Logo";
@@ -6,6 +6,7 @@ import { StatusDot } from "./components/ui";
 import { ago, cx, duration } from "./lib/format";
 import { useNow, usePoll, useRoute, useTheme } from "./lib/hooks";
 import Crypto from "./pages/Crypto";
+import Edges from "./pages/Edges";
 import Fees from "./pages/Fees";
 import Login from "./pages/Login";
 import Performance from "./pages/Performance";
@@ -16,6 +17,7 @@ import System from "./pages/System";
 const NAV = [
   { path: "plays", label: "Plays", icon: Radar },
   { path: "scan", label: "Scan", icon: ScanSearch },
+  { path: "edges", label: "Edges", icon: Target },
   { path: "fees", label: "Fees", icon: Receipt },
   { path: "crypto", label: "Crypto model", icon: Bitcoin },
   { path: "performance", label: "Performance", icon: ChartLine },
@@ -78,6 +80,9 @@ function Shell({ onLogout }: { onLogout: () => void }) {
       break;
     case "fees":
       page = <Fees />;
+      break;
+    case "edges":
+      page = <Edges />;
       break;
     case "crypto":
       page = <Crypto />;
