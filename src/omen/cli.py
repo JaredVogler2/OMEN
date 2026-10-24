@@ -381,6 +381,110 @@ def cmd_publish(s: Settings, args: argparse.Namespace) -> int:
     return 1
 
 
+def build_lp(s: Settings):
+    """The liquidity-reward service with a paper venue, or (``[liquidity].mode = "live"``) real post-only orders."""
+    from omen.config import PROD_BASE_URL
+    from omen.execution import LIVE_ACK
+    from omen.kalshi.auth import KalshiSigner
+    from omen.liquidity.maker import LiveVenue, PaperVenue
+    from omen.liquidity.service import LiquidityService
+
+    ledger = Ledger(s.database)
+    if s.liquidity.mode == "live":
+        if s.live_ack != LIVE_ACK:
+            raise ConfigError(f'live liquidity quoting needs OMEN_LIVE_ACK="{LIVE_ACK}"')
+        if not (s.kalshi_api_key_id and s.kalshi_private_key_path):
+            raise ConfigError("live liquidity quoting needs KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PATH")
+        signer = KalshiSigner.from_file(s.kalshi_api_key_id, s.kalshi_private_key_path)
+        venue = LiveVenue(KalshiClient(HttpClient(PROD_BASE_URL, rate_per_second=8, max_retries=2), signer))
+    else:
+        venue = PaperVenue()
+    return LiquidityService(s, _client(s), ledger, _notifier(s, ledger), venue), ledger
+
+
+def cmd_lp(s: Settings, args: argparse.Namespace) -> int:
+    """Liquidity-reward market making: run the quoting loop, show results, or rank today's reward programs."""
+    from omen.liquidity.programs import eligible, fetch_active
+    from omen.liquidity.service import mid, policy_from, reward_rate
+
+    now = datetime.now(UTC)
+    if args.lp_cmd == "run":
+        import signal
+
+        if not s.liquidity.enabled:
+            print("liquidity quoting is disabled ([liquidity].enabled = false)")
+            return 0
+
+        def stop(signum, frame):  # systemd stops with SIGTERM: exit through run()'s cancel-everything cleanup
+            raise SystemExit(0)
+
+        signal.signal(signal.SIGTERM, stop)
+        with InstanceLock(s.state_dir / "omen-lp.lock"):
+            service, _ = build_lp(s)
+            if service.mode == "live":
+                print(f"canceled {service.venue.cancel_stale()} resting order(s) left by a previous run")
+            print(f"liquidity quoting ({service.mode}); kill switch: {service.kill_file()}")
+            service.run(cycles=args.cycles)
+        return 0
+    if args.lp_cmd == "status":
+        service, ledger = build_lp(s)
+        held = ledger.lp_positions(service.mode)
+        books = service.client.orderbooks(sorted(held)) if held else {}
+        sm = service.summary(now, books)
+        print(f"liquidity rewards ({service.mode})")
+        for label in ("day", "week", "total"):
+            d = sm[label]
+            print(
+                f"  {label:5s}: rewards ${d['reward_usd']:9.2f} in {d['reward_markets']:4.0f} markets"
+                f" | fills {d['fills']:5.0f} ({d['contracts']:7.0f} contracts, ${d['notional']:8.2f})"
+                f" | settled P&L ${d['settled_pnl']:+8.2f} | fees ${d['fees']:.2f}"
+            )
+        unreal = sm["inventory_mark"] - sm["inventory_cost"]
+        print(f"  inventory: cost ${sm['inventory_cost']:.2f}, marked ${sm['inventory_mark']:.2f} ({unreal:+.2f})")
+        for ticker, sides in sorted(held.items()):
+            m = mid(books.get(ticker))
+            for side, (q, c) in sides.items():
+                if q:
+                    mark = "" if m is None else f" mark {(m if side == 'yes' else 1 - m):.2f}"
+                    print(f"    {ticker:44s} {side.upper():3s} {q:7.0f} @ {c / q:.3f}{mark}")
+        if sm["by_series"]:
+            print("  rewards by series (7 days): " + ", ".join(f"{k} ${v:.2f}" for k, v in sm["by_series"]))
+        return 0
+    # programs: what the policy would earn per dollar in each live program right now
+    client = _client(s)
+    lp = s.liquidity
+    progs = eligible(
+        fetch_active(client.http),
+        now,
+        min_hours=lp.min_program_hours,
+        min_reward_per_day=lp.min_reward_per_day_usd,
+        exclude=lp.exclude_series,
+        min_time_left=timedelta(minutes=10),
+        limit=max(args.top * 3, lp.max_markets),
+    )
+    books = client.orderbooks([p.ticker for p in progs])
+    policy = policy_from(s)
+    rows = []
+    for p in progs:
+        book = books.get(p.ticker)
+        if book is None:
+            continue
+        for q in policy.quotes(book, {}):
+            per_day = reward_rate(p, book, {q.side: (q.price, q.size)}) * 86400
+            rows.append((per_day / (q.price * q.size), per_day, p, q))
+    rows.sort(key=lambda r: -r[0])
+    print(
+        f"{len(progs)} eligible reward programs; quoting the {lp.sides} side(s) at the best bid, "
+        f"${lp.capital_per_market_usd:.0f} per market"
+    )
+    for ratio, per_day, p, q in rows[: args.top]:
+        print(
+            f"  {p.ticker:44s} pays ${p.per_day:7.0f}/day | bid {q.side.upper():3s} {q.size:4d} @ {q.price:.2f} "
+            f"(${q.price * q.size:6.2f}) -> ~${per_day:6.2f}/day ({ratio * 100:5.1f}%/day of the capital)"
+        )
+    return 0
+
+
 def cmd_web(s: Settings, args: argparse.Namespace) -> int:
     from omen.web.local import serve
 
@@ -443,6 +547,14 @@ def main(argv: list[str] | None = None) -> int:
     at.add_argument("--out", help="output file (default ~/.omen/atlas.json)")
     at.set_defaults(fn=cmd_atlas)
     sub.add_parser("publish", help="push the live feed to the website once (setup check)").set_defaults(fn=cmd_publish)
+    lpp = sub.add_parser("lp", help="liquidity-reward market making (paper by default)")
+    lps = lpp.add_subparsers(dest="lp_cmd", required=True)
+    lr = lps.add_parser("run", help="run the quoting loop (paper unless [liquidity].mode = live)")
+    lr.add_argument("--cycles", type=int, default=None, help="stop after this many cycles")
+    lps.add_parser("status", help="rewards, fills, inventory and settled P&L")
+    lpg = lps.add_parser("programs", help="rank live reward programs by what the policy would earn per dollar")
+    lpg.add_argument("--top", type=int, default=25)
+    lpp.set_defaults(fn=cmd_lp)
     w = sub.add_parser("web", help="run the website locally (API + built frontend) for previews")
     w.add_argument("--host", default="127.0.0.1")
     w.add_argument("--port", type=int, default=8787)

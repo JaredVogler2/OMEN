@@ -152,6 +152,30 @@ class ExecutionSettings:
 
 
 @dataclass
+class LiquiditySettings:
+    """Liquidity-reward market making (``omen lp``): rest bids where Kalshi pays liquidity rewards.
+
+    paper (default) fills virtual orders from the public tape; live places real post-only orders and also needs
+    KALSHI_API_KEY_ID / KALSHI_PRIVATE_KEY_PATH and OMEN_LIVE_ACK."""
+
+    enabled: bool = True
+    mode: str = "paper"  # paper | live
+    cycle_seconds: int = 60
+    max_markets: int = 100
+    sides: str = "cheap"  # cheap: one bid on the cheaper side; both: a bid on each side
+    min_quote_price: float = 0.02
+    max_quote_price: float = 0.50
+    capital_per_market_usd: float = 25.0  # resting bids plus inventory, per market
+    max_total_capital_usd: float = 1000.0
+    max_contracts_per_order: int = 500
+    min_reward_per_day_usd: float = 5.0
+    min_program_hours: float = 12.0  # skip 15-minute and hourly programs (fast markets pick resting orders off)
+    stop_before_close_minutes: int = 120  # no resting orders in the last hours before a market closes
+    exclude_series: str = r"15M$|^KXTEMP\w*H$|RATEH$|^KXAAAGAS|^KXDIESEL|MATCH$|^KXCRYPTOLEAD|GAME$|SPREAD|TOTAL"
+    summary_every_hours: int = 6
+
+
+@dataclass
 class Settings:
     scan: ScanSettings = field(default_factory=ScanSettings)
     lock: LockSettings = field(default_factory=LockSettings)
@@ -162,6 +186,7 @@ class Settings:
     alerts: AlertSettings = field(default_factory=AlertSettings)
     paper: PaperSettings = field(default_factory=PaperSettings)
     execution: ExecutionSettings = field(default_factory=ExecutionSettings)
+    liquidity: LiquiditySettings = field(default_factory=LiquiditySettings)
 
     # runtime / environment (never from TOML)
     base_url: str = PROD_BASE_URL
@@ -195,6 +220,7 @@ SECTIONS = {
     "alerts": AlertSettings,
     "paper": PaperSettings,
     "execution": ExecutionSettings,
+    "liquidity": LiquiditySettings,
 }
 
 
@@ -291,6 +317,15 @@ def load_settings(config_path: str | os.PathLike[str] | None = None, env: dict[s
         settings.execution.mode = env["OMEN_EXECUTION_MODE"].strip().lower()
     if settings.execution.mode not in {"off", "demo", "live"}:
         raise ConfigError("execution mode must be off, demo or live")
+    if env.get("OMEN_LP_MODE"):
+        settings.liquidity.mode = env["OMEN_LP_MODE"].strip().lower()
+    lp = settings.liquidity
+    if lp.mode not in {"paper", "live"}:
+        raise ConfigError("[liquidity].mode must be paper or live")
+    if lp.sides not in {"cheap", "both"}:
+        raise ConfigError("[liquidity].sides must be cheap or both")
+    if not 0 < lp.min_quote_price <= lp.max_quote_price < 1:
+        raise ConfigError("[liquidity] quote prices must satisfy 0 < min_quote_price <= max_quote_price < 1")
     return settings
 
 

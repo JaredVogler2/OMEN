@@ -99,3 +99,22 @@ max_cost_per_play_usd = "50"
 max_daily_cost_usd = "200"
 allow_models = false
 kill_switch_file = "KILL"         # create <state_dir>/KILL to stop all execution immediately
+
+[liquidity]
+# `omen lp run` (or the omen-lp service): rest bids where Kalshi's Liquidity Incentive Program pays for them.
+# See docs/LIQUIDITY.md. Paper fills come from the public tape; live also needs keys and OMEN_LIVE_ACK.
+mode = "paper"                    # paper | live   (env OMEN_LP_MODE overrides)
+cycle_seconds = 60
+max_markets = 100
+sides = "cheap"                   # cheap: one bid on the cheaper side (same reward, a fraction of the capital) | both
+min_quote_price = 0.02
+max_quote_price = 0.50
+capital_per_market_usd = 25.0     # resting bids plus inventory, per market
+max_total_capital_usd = 1000.0
+max_contracts_per_order = 500
+min_reward_per_day_usd = 5.0
+min_program_hours = 12.0          # 15-minute and hourly programs lost more to fills than they paid in the backtest
+stop_before_close_minutes = 120
+# series where resting orders were picked off in the backtest (fast prices, scheduled data, live sports)
+exclude_series = '15M$|^KXTEMP\w*H$|RATEH$|^KXAAAGAS|^KXDIESEL|MATCH$|^KXCRYPTOLEAD|GAME$|SPREAD|TOTAL'
+summary_every_hours = 6

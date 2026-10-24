@@ -56,6 +56,16 @@ CREATE TABLE IF NOT EXISTS outbox (
   created_at TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, sent_at TEXT, message_id TEXT,
   edit_of TEXT);
 CREATE INDEX IF NOT EXISTS outbox_pending ON outbox(sent_at);
+CREATE TABLE IF NOT EXISTS lp_fills (
+  id INTEGER PRIMARY KEY, mode TEXT NOT NULL, ts TEXT NOT NULL, ticker TEXT NOT NULL, side TEXT NOT NULL,
+  price REAL NOT NULL, qty REAL NOT NULL, fee REAL NOT NULL, order_id TEXT, trade_id TEXT,
+  UNIQUE(mode, trade_id, order_id, side));
+CREATE TABLE IF NOT EXISTS lp_rewards (
+  mode TEXT NOT NULL, hour TEXT NOT NULL, ticker TEXT NOT NULL, usd REAL NOT NULL, seconds REAL NOT NULL,
+  PRIMARY KEY(mode, hour, ticker));
+CREATE TABLE IF NOT EXISTS lp_settlements (
+  mode TEXT NOT NULL, ticker TEXT NOT NULL, result TEXT NOT NULL, ts TEXT NOT NULL, cost REAL NOT NULL,
+  payout REAL NOT NULL, PRIMARY KEY(mode, ticker));
 """
 
 
@@ -451,3 +461,82 @@ class Ledger:
             (iso(since), mode),
         )
         return sum((Decimal(r["cost"] or "0") for r in rows), Decimal(0))
+
+    # ---------------------------------------------------------------------------------- liquidity provision
+    def lp_record_fill(self, mode: str, fill: Any) -> bool:
+        """Store a fill once; returns False if it was already recorded."""
+        cur = self.db.execute(
+            "INSERT OR IGNORE INTO lp_fills(mode,ts,ticker,side,price,qty,fee,order_id,trade_id) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (mode, iso(fill.ts), fill.ticker, fill.side, fill.price, fill.qty, fill.fee, fill.order_id, fill.trade_id),
+        )
+        return cur.rowcount > 0
+
+    def lp_add_reward(self, mode: str, now: datetime, ticker: str, usd: float, seconds: float) -> None:
+        hour = now.astimezone(UTC).strftime("%Y-%m-%dT%H:00")
+        self.db.execute(
+            "INSERT INTO lp_rewards(mode,hour,ticker,usd,seconds) VALUES(?,?,?,?,?) "
+            "ON CONFLICT(mode,hour,ticker) DO UPDATE SET usd=usd+excluded.usd, seconds=seconds+excluded.seconds",
+            (mode, hour, ticker, usd, seconds),
+        )
+
+    def lp_positions(self, mode: str) -> dict[str, dict[str, list[float]]]:
+        """Unsettled inventory: ticker -> side -> [contracts, cost including fees]."""
+        out: dict[str, dict[str, list[float]]] = {}
+        rows = self.db.execute(
+            "SELECT ticker, side, SUM(qty) q, SUM(qty*price + fee) c FROM lp_fills f WHERE mode=? AND NOT EXISTS "
+            "(SELECT 1 FROM lp_settlements s WHERE s.mode=f.mode AND s.ticker=f.ticker) GROUP BY ticker, side",
+            (mode,),
+        )
+        for r in rows:
+            out.setdefault(r["ticker"], {"yes": [0.0, 0.0], "no": [0.0, 0.0]})[r["side"]] = [r["q"], r["c"]]
+        return out
+
+    def lp_settle(self, mode: str, ticker: str, yes_payout: float, now: datetime) -> float:
+        """Settle our inventory in a finalized market (``yes_payout`` per YES contract, NO gets the rest)."""
+        pos = self.lp_positions(mode).get(ticker)
+        if not pos:
+            return 0.0
+        cost = pos["yes"][1] + pos["no"][1]
+        payout = pos["yes"][0] * yes_payout + pos["no"][0] * (1 - yes_payout)
+        self.db.execute(
+            "INSERT OR IGNORE INTO lp_settlements(mode,ticker,result,ts,cost,payout) VALUES(?,?,?,?,?,?)",
+            (mode, ticker, f"{yes_payout:.4f}", iso(now), cost, payout),
+        )
+        return payout - cost
+
+    def lp_summary(self, mode: str, since: datetime | None = None) -> dict[str, float]:
+        cut = iso(since) if since else ""
+        hour_cut = since.astimezone(UTC).strftime("%Y-%m-%dT%H:00") if since else ""
+        rew = self.db.execute(
+            "SELECT COALESCE(SUM(usd),0) usd, COUNT(DISTINCT ticker) markets FROM lp_rewards "
+            "WHERE mode=? AND hour >= ?",
+            (mode, hour_cut),
+        ).fetchone()
+        fills = self.db.execute(
+            "SELECT COUNT(*) n, COALESCE(SUM(qty),0) q, COALESCE(SUM(qty*price),0) notional, COALESCE(SUM(fee),0) fee "
+            "FROM lp_fills WHERE mode=? AND ts >= ?",
+            (mode, cut),
+        ).fetchone()
+        settled = self.db.execute(
+            "SELECT COUNT(*) n, COALESCE(SUM(payout - cost),0) pnl FROM lp_settlements WHERE mode=? AND ts >= ?",
+            (mode, cut),
+        ).fetchone()
+        return {
+            "reward_usd": float(rew["usd"]),
+            "reward_markets": float(rew["markets"]),
+            "fills": float(fills["n"]),
+            "contracts": float(fills["q"]),
+            "notional": float(fills["notional"]),
+            "fees": float(fills["fee"]),
+            "settled_markets": float(settled["n"]),
+            "settled_pnl": float(settled["pnl"]),
+        }
+
+    def lp_reward_by_series(self, mode: str, since: datetime) -> list[tuple[str, float]]:
+        hour_cut = since.astimezone(UTC).strftime("%Y-%m-%dT%H:00")
+        totals: dict[str, float] = {}
+        for r in self.db.execute("SELECT ticker, usd FROM lp_rewards WHERE mode=? AND hour >= ?", (mode, hour_cut)):
+            series = r["ticker"].split("-", 1)[0]
+            totals[series] = totals.get(series, 0.0) + r["usd"]
+        return sorted(totals.items(), key=lambda kv: -kv[1])
