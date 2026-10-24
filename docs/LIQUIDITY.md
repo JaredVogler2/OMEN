@@ -88,9 +88,54 @@ Near the close the outcome becomes known, the losing side collapses toward 0, an
 down. The first forward paper run met exactly this on Trump-approval markets that settle on a 1 PM reading. So
 `stop_before_close_minutes` defaults to 720: no resting bids in a market's last 12 hours.
 
-### 3. Forward paper test on live data
+### 3. The merged policy, replayed
 
-<!-- FORWARD_RESULTS -->
+This replays exactly what the default configuration does over the settled rewarded markets. It bids at the best
+price on the cheaper side, only at 2–50¢, skips the excluded series, and never quotes in a market's last 12 hours.
+A bid fills only when a trade goes through its price, which is the most adverse kind of fill. Each fill is marked
+against the mid one hour later; settlement P&L on 1–5¢ bids is a lottery and too noisy to read. Rewards are the same
+quote, sized to $25, scored with the filed formula in 36 live book snapshots (6 hours). Both are per dollar of
+resting bid per day:
+
+| Sample | Markets | Fills | Fill mark-out (95%) |
+|---|---|---|---|
+| Older half | 112 | 321 | **+14.9% (+3.2, +34.0)** |
+| Newer half | 112 | 229 | **+6.9% (−0.9, +15.8)** |
+| All | 224 | 550 | **+10.7% (+3.6, +19.5)** |
+
+| Series | Fill mark-out | Reward (live books) | Net |
+|---|---|---|---|
+| Rotten Tomatoes (KXRT) | +17% (−16, +67) | +10% | +28% |
+| Trump approval (KXTRUMPAPPROVE) | −24% (−87, +28) | +230% | +206% |
+| Hormuz weekly (KXHORMUZWEEKLY) | −11% (−24, −3) | +7% | −4% |
+| YouTube views (KXYTVIEWSW) | +26% (+10, +50) | not sampled | — |
+
+On average, cheap bids filled more than 12 hours before close were bought below where the market settled an hour
+later: impatient sellers dumping long shots. The rewards come on top. The percentages are large because a 2–10¢ bid
+ties up very little money. In dollars, the per-market cap ($25) and per-series cap (30%) limit what any one market
+can earn or lose.
+
+### 4. Forward paper test on live data
+
+First day, Saturday 2026-10-24, about 4–5 hours, $1,000 cap, paper only. Rewards are estimated with the filed
+formula. "Settled" is real settlement P&L on the paper positions, and "open" is the remaining positions marked at
+the mid.
+
+| Run | Rewards | Settled P&L | Open (marked) | Net | Realized (rewards + settled) |
+|---|---|---|---|---|---|
+| `stop_before_close_minutes = 120` (5.2 h) | +$40.02 | −$49.96 | +$73.02 | +$63.08 | **−$9.94** |
+| `stop_before_close_minutes = 720` (3.9 h) | +$37.20 | $0.00 | +$22.19 | +$59.39 | **+$37.20** |
+
+Fees were $0: the bot only places post-only maker orders, and these series charge makers nothing.
+
+The 2-hour run's bids on Trump-approval markets filled in the hours before the 1 PM reading that settles them. They
+lost more at settlement than all the rewards earned, which is the late-fill effect in §2. The 12-hour run did not
+hold those positions.
+
+This is one weekend day. Rewards came mostly from Trump approval (about 60%), Rotten Tomatoes and EO-week markets,
+and the open positions settle over the following days. Treat it as a direction, not proof. Run paper on the Pi for
+several weekdays before risking money, then start live small (see below) and compare Kalshi's actual reward credits
+with `omen lp status`.
 
 ## Risks, plainly
 
