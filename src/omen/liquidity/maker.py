@@ -135,10 +135,41 @@ class DeadSideFlow:
     window: timedelta = timedelta(hours=24)
     min_supply_minutes: float = 30.0
     _obs: dict[str, deque] = field(default_factory=dict)  # ticker -> (time, supply minutes, contracts sold)
+    _seeded: set[str] = field(default_factory=set)  # markets whose history was loaded
 
     def observe(self, ticker: str, now: datetime, supply_minutes: float, contracts: float) -> None:
         if supply_minutes > 0 or contracts > 0:
             self._obs.setdefault(ticker, deque()).append((now, supply_minutes, contracts))
+
+    def seeded(self, ticker: str) -> bool:
+        return ticker in self._seeded
+
+    def backfill(self, ticker: str, dead: str, candles: list[dict], trades: list[dict]) -> None:
+        """Seed a market's window from 1-minute candles (did a 1c bid rest on the dead side?) and the trades of the
+        same span, so a restart does not wait a day to learn which markets are safe. Minutes already observed live
+        are kept as they are."""
+        ask_or_bid, mark = ("yes_ask", 0.99) if dead == "no" else ("yes_bid", 0.01)
+        sold: dict[int, float] = {}
+        for t in trades:
+            n = dead_side_sales(t, dead)
+            if n:
+                minute = math.ceil(trade_fields(t)[0].timestamp() / 60) * 60
+                sold[minute] = sold.get(minute, 0.0) + n
+        existing = self._obs.get(ticker) or deque()
+        cutoff = existing[0][0] if existing else None
+        seeded = []
+        for c in candles:
+            end = int(c["end_period_ts"])
+            ts = datetime.fromtimestamp(end, UTC)
+            if cutoff is not None and ts >= cutoff:
+                continue
+            close = (c.get(ask_or_bid) or {}).get("close_dollars")
+            n = sold.get(end, 0.0)
+            supply = n > 0 or (close is not None and abs(float(close) - mark) < 1e-9)
+            if supply:
+                seeded.append((ts, 1.0, n))
+        self._obs[ticker] = deque([*seeded, *existing])
+        self._seeded.add(ticker)
 
     def rate(self, ticker: str, now: datetime, prior: float) -> float:
         """Contracts per supply minute over the window, or ``prior`` while too little supply was seen."""

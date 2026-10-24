@@ -244,6 +244,8 @@ class FakeKalshi:
         self.status = "active"
         self.result = ""
         self.trades: list[dict] = []
+        self.history: list[dict] = []  # trades returned for a single-market query (flow backfill)
+        self.candles: list[dict] = []
         self.book = {"yes_dollars": [["0.0500", "500.00"]], "no_dollars": [["0.9300", "2000.00"]]}
 
     def handler(self, request: httpx.Request) -> httpx.Response:
@@ -280,7 +282,10 @@ class FakeKalshi:
                 },
             )
         if u.path.endswith("/markets/trades"):
-            return httpx.Response(200, json={"trades": self.trades, "cursor": ""})
+            trades = self.history if "ticker" in q else self.trades
+            return httpx.Response(200, json={"trades": trades, "cursor": ""})
+        if u.path.endswith("/candlesticks"):
+            return httpx.Response(200, json={"candlesticks": self.candles})
         if u.path.endswith("/markets"):
             return httpx.Response(
                 200,
@@ -500,3 +505,41 @@ def test_service_stops_completing_a_dead_side_that_sellers_hit_faster_than_the_r
         st = svc.step()
     # 100 contracts a minute sold at 1c cost $1,440 a day, far more than the ~$48 a day the bid earns
     assert ("KXRT-FILM-90", "no") not in svc.venue.orders and st["dead_quotes"] == 0
+
+
+def candle(ts: datetime, yes_bid: float, yes_ask: float) -> dict:
+    return {
+        "end_period_ts": int(ts.timestamp()),
+        "yes_bid": {"close_dollars": f"{yes_bid:.4f}"},
+        "yes_ask": {"close_dollars": f"{yes_ask:.4f}"},
+    }
+
+
+def test_dead_side_flow_backfills_from_candles_and_trades_without_double_counting():
+    from omen.liquidity.maker import DeadSideFlow
+
+    f = DeadSideFlow()
+    start = T0 - timedelta(hours=2)
+    # NO is dead: a 1c NO bid (YES ask 99c) rested in 40 of 60 minutes; 2 contracts were sold into it in 10 of them
+    candles = [candle(start + timedelta(minutes=i), 0.98, 0.99 if i < 40 else 0.98) for i in range(1, 61)]
+    trades = [trade("M", start + timedelta(minutes=i, seconds=-20), 0.99, "yes", 2, f"h{i}") for i in range(1, 11)]
+    f.observe("M", start + timedelta(minutes=50), 10, 0)  # already seen live: minutes from 50 on are not re-counted
+    f.backfill("M", "no", candles, trades)
+    assert f.seeded("M")
+    assert f.rate("M", T0, prior=9.0) == pytest.approx(20 / (39 + 10))
+
+
+def test_service_backfills_flow_history_before_completing_a_dead_side(tmp_path):
+    fake = FakeKalshi()
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+    start = T0 - timedelta(hours=1)
+    # the last hour: a 1c NO bid rested every minute and someone sold 100 contracts into it each minute
+    fake.candles = [candle(start + timedelta(minutes=i), 0.98, 0.99) for i in range(1, 61)]
+    fake.history = [
+        trade("KXRT-FILM-90", start + timedelta(minutes=i, seconds=-30), 0.99, "yes", 100, f"h{i}")
+        for i in range(1, 61)
+    ]
+    svc, _ = service(tmp_path, fake)
+    st = svc.step()
+    assert svc.flow.seeded("KXRT-FILM-90")
+    assert st["dead_quotes"] == 0  # without history the prior (1 contract a minute) would have allowed the bid

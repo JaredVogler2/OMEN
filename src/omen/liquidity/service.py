@@ -31,6 +31,7 @@ from omen.liquidity.scoring import snapshot
 log = logging.getLogger(__name__)
 REFRESH = timedelta(minutes=5)
 MAX_TAPE_PAGES = 30
+MAX_BACKFILLS = 10  # markets whose 1c selling history is fetched per cycle (a few requests each)
 
 
 def policy_from(settings: Settings) -> QuotePolicy:
@@ -228,6 +229,34 @@ class LiquidityService:
             supply = sold > 0 or any(price <= 0.01 + 1e-9 for price, _ in dead_levels)
             self.flow.observe(p.ticker, now, elapsed.total_seconds() / 60 if supply else 0.0, sold)
 
+    def _backfill_flow(self, ticker: str, dead: str, now: datetime) -> None:
+        """Load a market's last day of 1-minute candles and trades into the flow window (once per market)."""
+        start = int((now - self.flow.window).timestamp())
+        try:
+            candles = (
+                self.client.http.get_json(
+                    f"/series/{series_of(ticker)}/markets/{ticker}/candlesticks",
+                    params={"start_ts": start, "end_ts": int(now.timestamp()), "period_interval": 1},
+                ).get("candlesticks")
+                or []
+            )
+            trades: list[dict] = []
+            cursor = ""
+            for _ in range(MAX_TAPE_PAGES):
+                params: dict = {"ticker": ticker, "min_ts": start, "limit": 1000}
+                if cursor:
+                    params["cursor"] = cursor
+                data = self.client.http.get_json("/markets/trades", params=params)
+                trades.extend(data.get("trades") or [])
+                cursor = data.get("cursor") or ""
+                if not cursor:
+                    break
+        except HttpError as exc:
+            self.last_error = f"flow history {ticker}: {exc}"
+            log.warning(self.last_error)
+            return
+        self.flow.backfill(ticker, dead, candles, trades)
+
     def _desired(self, now: datetime, held: dict[str, dict[str, list[float]]]) -> list[Quote]:
         """Quotes for every eligible market, the best reward per dollar first, until the capital budget is used."""
         stop = timedelta(minutes=self.cfg.stop_before_close_minutes)
@@ -252,6 +281,7 @@ class LiquidityService:
                 if rate * 86400 / q.size < self.cfg.min_reward_per_contract_day:
                     continue  # the reward would not cover what fills cost on average
                 best[(q.ticker, q.side)] = (rate / max(q.price * q.size, 1e-9), q)
+        backfills = 0
         for p in self.dead_programs:
             book = usable(p)
             if book is None:
@@ -261,6 +291,9 @@ class LiquidityService:
             if q is None:
                 continue
             rate = reward_rate(p, book, {q.side: (q.price, q.size)})
+            if not self.flow.seeded(p.ticker) and backfills < MAX_BACKFILLS:
+                backfills += 1
+                self._backfill_flow(p.ticker, q.side, now)
             flow = self.flow.rate(p.ticker, now, self.cfg.dead_side_flow_prior)
             if flow * 1440 * 0.01 > self.cfg.dead_side_max_flow_ratio * rate * 86400:
                 continue  # 1c sales here would cost more than the reward: such markets lost money in the replay
