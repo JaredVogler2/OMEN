@@ -136,7 +136,7 @@ shared secret); the site never holds Kalshi keys or places orders. Setup takes a
 
 ## Status and honesty
 
-* Tested: 129 unit and end-to-end tests. They cover fee math against Kalshi's published examples, structural traps
+* Tested: 130 unit and end-to-end tests. They cover fee math against Kalshi's published examples, structural traps
   (opposite-team spreads, holes in partitions, fair-price clauses), a fake-exchange pipeline (alert → GONE edit →
   settlement → fee-change notice) and the website API (auth, signed ingest, streamed scans, budgets). Read-only scans
   against the live Kalshi API ran from the build environment. The latest full scan (2026-10-23) covered 169,024

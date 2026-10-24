@@ -111,6 +111,7 @@ min_quote_price = 0.02
 max_quote_price = 0.50
 capital_per_market_usd = 25.0     # resting bids plus inventory, per market
 max_total_capital_usd = 1000.0
+max_series_share = 0.30           # no series (often one news event or settlement) gets more than 30% of the capital
 max_contracts_per_order = 500
 min_reward_per_day_usd = 5.0
 min_program_hours = 12.0          # 15-minute and hourly programs lost more to fills than they paid in the backtest

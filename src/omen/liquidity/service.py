@@ -15,7 +15,7 @@ from omen.kalshi.client import KalshiClient
 from omen.kalshi.models import Market, OrderBook
 from omen.ledger import Ledger
 from omen.liquidity.maker import Fill, Quote, QuotePolicy, Venue, levels
-from omen.liquidity.programs import Program, eligible, fetch_active
+from omen.liquidity.programs import Program, eligible, fetch_active, series_of
 from omen.liquidity.scoring import snapshot
 
 log = logging.getLogger(__name__)
@@ -196,13 +196,22 @@ class LiquidityService:
                 candidates.append((rate / max(q.price * q.size, 1e-9), q))
         candidates.sort(key=lambda c: -c[0])
         budget = self.cfg.max_total_capital_usd - sum(v[1] for sides in held.values() for v in sides.values())
+        # one series (often one news event or one settlement) may not take more than its share of the capital
+        series_cap = self.cfg.max_total_capital_usd * self.cfg.max_series_share
+        by_series: dict[str, float] = {}
+        for ticker, sides in held.items():
+            key = series_of(ticker)
+            by_series[key] = by_series.get(key, 0.0) + sum(v[1] for v in sides.values())
         out: list[Quote] = []
         for score, q in candidates:
             if score <= 0:
                 break
-            if q.price * q.size > budget:
+            cost = q.price * q.size
+            key = series_of(q.ticker)
+            if cost > budget or by_series.get(key, 0.0) + cost > series_cap:
                 continue
-            budget -= q.price * q.size
+            budget -= cost
+            by_series[key] = by_series.get(key, 0.0) + cost
             out.append(q)
         return out
 

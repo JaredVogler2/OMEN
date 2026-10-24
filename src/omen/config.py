@@ -167,6 +167,7 @@ class LiquiditySettings:
     max_quote_price: float = 0.50
     capital_per_market_usd: float = 25.0  # resting bids plus inventory, per market
     max_total_capital_usd: float = 1000.0
+    max_series_share: float = 0.30  # no series (often one news event) gets more than this share of the capital
     max_contracts_per_order: int = 500
     min_reward_per_day_usd: float = 5.0
     min_program_hours: float = 12.0  # skip 15-minute and hourly programs (fast markets pick resting orders off)
@@ -324,6 +325,8 @@ def load_settings(config_path: str | os.PathLike[str] | None = None, env: dict[s
         raise ConfigError("[liquidity].mode must be paper or live")
     if lp.sides not in {"cheap", "both"}:
         raise ConfigError("[liquidity].sides must be cheap or both")
+    if not 0 < lp.max_series_share <= 1:
+        raise ConfigError("[liquidity].max_series_share must be in (0, 1]")
     if not 0 < lp.min_quote_price <= lp.max_quote_price < 1:
         raise ConfigError("[liquidity] quote prices must satisfy 0 < min_quote_price <= max_quote_price < 1")
     return settings

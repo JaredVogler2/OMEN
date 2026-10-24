@@ -392,3 +392,13 @@ def test_published_feed_carries_the_liquidity_block():
     assert lp["mode"] == "paper" and lp["day"]["reward_usd"] == pytest.approx(1.25)
     assert lp["inventory"] == [{"ticker": "KXRT-FILM-90", "side": "yes", "qty": 500.0, "cost": 25.0}]
     assert lp["by_series"] == [{"series": "KXRT", "usd": 1.25}] and len(lp["fills"]) == 1
+
+
+def test_capital_is_capped_per_series(tmp_path):
+    fake = FakeKalshi()
+    svc, _ = service(tmp_path, fake)
+    svc.cfg.max_total_capital_usd = 100
+    svc.cfg.max_series_share = 0.2  # $20 for KXRT, less than the $25 quote
+    assert svc.step()["quotes"] == 0
+    svc.cfg.max_series_share = 0.3
+    assert svc.step()["quotes"] == 1
