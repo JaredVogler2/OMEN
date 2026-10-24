@@ -49,6 +49,7 @@ class LockSettings:
     enable_no_basket: bool = True
     enable_ladder: bool = True
     enable_yes_partition: bool = True
+    enable_cover: bool = True  # cross-series covers: thresholds + buckets settling on the same number
     # Buckets reported in steps ("59-60", "61-62" whole degrees; "84,999.99"/"85,000" cents) leave one-step gaps.
     allow_step_gap_partitions: bool = True
 

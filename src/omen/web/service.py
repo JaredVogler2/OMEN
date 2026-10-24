@@ -89,7 +89,7 @@ class ScanParams:
                 raise HTTPError(400, "horizon_hours must be a number or 'all'") from None
             if not 1 <= horizon_hours <= 24 * 60:
                 raise HTTPError(400, "horizon_hours must be between 1 and 1440")
-        allowed = {"no_basket", "ladder", "yes_partition"}
+        allowed = {"no_basket", "ladder", "yes_partition", "cover"}
         strategies = set(body.get("strategies") or allowed)
         if not strategies <= allowed:
             raise HTTPError(400, f"unknown strategy: {sorted(strategies - allowed)}")
@@ -276,6 +276,7 @@ class WebService:
             enable_no_basket="no_basket" in params.strategies,
             enable_ladder="ladder" in params.strategies,
             enable_yes_partition="yes_partition" in params.strategies,
+            enable_cover="cover" in params.strategies,
         )
         try:
             deadline = time.monotonic() + self.sweep_seconds
@@ -364,8 +365,8 @@ class WebService:
         key = str(body.get("key") or "")
         strategy, _, legs = key.partition("|")
         tickers = [leg.rsplit(":", 1)[0] for leg in legs.split(",") if leg]
-        if strategy not in {"no_basket", "ladder", "yes_partition"} or not tickers or len(tickers) > 60:
-            raise HTTPError(400, "re-verify works for LOCK plays (no_basket, ladder, yes_partition)")
+        if strategy not in {"no_basket", "ladder", "yes_partition", "cover"} or not tickers or len(tickers) > 60:
+            raise HTTPError(400, "re-verify works for LOCK plays (no_basket, ladder, yes_partition, cover)")
         now = self.clock()
         with self.lock:
             eng = self.engine

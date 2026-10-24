@@ -26,6 +26,7 @@ whole_contracts = true            # Kalshi accepts 0.01-contract fractions; whol
 enable_no_basket = true
 enable_ladder = true
 enable_yes_partition = true
+enable_cover = true               # cross-series locks: "above X" thresholds + "X to Y" buckets on the same number
 allow_step_gap_partitions = true  # buckets like "59-60" / "61-62" rely on whole-unit reporting
 
 [fees]

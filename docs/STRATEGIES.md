@@ -100,6 +100,41 @@ fees locks a profit. OMEN requires all of the following:
 A YES basket pays 0 if the exchange voids or resolves every bucket NO. That residual risk is printed on every alert,
 and these plays carry a lower confidence (0.95–0.97) than NO baskets and ladders (0.99).
 
+## 🔒 Cross-series lock (covers)
+
+Kalshi often lists one number in several series. For example, SOL's 5 pm price appears both as "above $X"
+thresholds (`KXSOLD`) and as "$X to $Y" buckets (`KXSOLE`), and both settle on the same 60-second CF Benchmarks
+average. Each market pays YES on an interval of that number:
+
+* YES on a market buys its interval;
+* NO on a one-sided market buys the other half-line (NO on "$70.25 or above" pays on anything below $70.25).
+
+Any set of positions whose intervals together cover the whole number line pays at least $1, whatever the
+settlement value. OMEN finds the **cheapest** such set as a shortest path over interval end points (Dijkstra). That
+covers the 3-leg "NO on $70.25 or above + YES on $70.25–70.4999 + YES on $70.50 or above" combination, longer chains,
+and anything else that covers the line. A second shape covers it **twice**: NO on a bucket [L, U] plus YES on
+"at least a" (a ≤ L) plus NO on "above b" (b ≥ U) pays at least $2 everywhere. It never relies on reporting
+precision.
+
+Markets are combined only when all of these match:
+
+* their settlement wording, with every number masked and the strike phrase removed (same index, same averaging
+  window, same wording);
+* units, close time and settlement time.
+
+Single-event combinations are left to ladders and YES baskets, so nothing is reported twice. As with YES baskets:
+
+* joins one reporting step apart (70.2499 / 70.25) need `allow_step_gap_partitions`, and the alert says so;
+* a "fair price" settlement clause rejects the cover;
+* a "resolves NO if data is missing" clause rejects it unless a NO leg would then pay.
+
+A randomized test checks that every reported cover pays its minimum at every possible settlement value.
+
+Live check, 2026-10-24: 12 universes across BTC, ETH, SOL and XRP, each pairing the threshold and bucket series at
+3 settlement times. None was profitable at the top of the book; the closest, a BTC double cover, was 0.28¢ per set
+away. These are separate order books quoted by different traders, so OMEN watches them every sweep for the moments
+they drift apart.
+
 ## 📈 Crypto threshold model (shadow until validated)
 
 These markets settle on a CF Benchmarks 60-second index average for BTC, ETH, SOL, XRP and DOGE: daily "above X at

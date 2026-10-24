@@ -26,6 +26,9 @@ LOCK strategies ([docs/STRATEGIES.md](docs/STRATEGIES.md)):
   pays at least 1 in every outcome. When the market prices A above B by more than fees, that is a lock.
 * **YES basket.** If an event's buckets provably cover every outcome, YES on all of them pays 1. This is used only
   when the rules have no "everything resolves NO" or "last fair price" clause.
+* **Cross-series lock.** When different series settle on the same number (SOL "above $X" thresholds next to SOL
+  "$X to $Y" buckets), the cheapest mix of YES and NO positions that covers every possible value pays at least 1.
+  OMEN finds it as a shortest path over the strikes.
 
 MODEL strategy: **crypto threshold**. This covers the BTC/ETH/SOL/XRP/DOGE price markets that settle on CF Benchmarks
 indices. Spot is the median of Coinbase, Kraken and Bitstamp. Volatility comes from realized and Deribit implied

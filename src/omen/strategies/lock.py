@@ -6,6 +6,8 @@
                 Profitable when A's YES bid exceeds B's YES ask by more than fees (the market prices A above B).
 * YES basket  - if an event's buckets provably cover every outcome, YES on all of them pays at least 1. Only used
                 when the rules carry no "everything resolves NO / to a fair price" clause.
+* Cover       - markets from different series that settle on the same number (thresholds next to buckets): the
+                cheapest set of YES/NO positions covering every value pays at least 1 (cover.py).
 
 Screening uses top-of-book prices; every candidate is then re-priced against the full order books (batch request),
 with each fill's fee rounded up, and sized so the guaranteed profit is maximal within the configured caps.
@@ -24,6 +26,7 @@ from omen.config import LockSettings
 from omen.fees.schedule import FeeQuote, FeeUnavailable
 from omen.kalshi.models import Event, Market, OrderBook
 from omen.money import ONE, ZERO
+from omen.strategies import cover
 from omen.strategies.base import LOCK, LegPlan, LegSpec, Opportunity, SizingLimits, size_sets
 from omen.strategies.structure import (
     UPPER_TYPES,
@@ -256,6 +259,71 @@ def screen_yes_partitions(
     return out, rejected
 
 
+# ------------------------------------------------------------------------------------------ cross-series cover
+def _cover_candidate(
+    events: dict[str, Event],
+    legs: list[tuple[Market, str]],
+    payout: Decimal,
+    payout_max: Decimal,
+    edge: Decimal,
+    step_gaps: int,
+) -> Candidate:
+    first = legs[0][0]
+    ev = cover._event(first, events)
+    series = sorted({m.series_ticker for m, _ in legs})
+    rationale = [
+        f"These {len(legs)} markets ({', '.join(series)}) settle on the same number at the same moment (identical "
+        "settlement wording, source, close and settlement time).",
+        "Together the legs pay on every possible value: "
+        + "; ".join(cover.describe_leg(m, side) for m, side in legs)
+        + f". Minimum payout {payout.normalize():f} per set whatever the outcome.",
+    ]
+    risks = ["Leg risk: fill every leg (fill-or-kill) or unwind; the legs sit on separate order books."]
+    if step_gaps:
+        risks.append(
+            "Adjacent strikes meet one reporting step apart (e.g. 70.2499 / 70.25): relies on the settlement value "
+            "being reported at that precision, as Kalshi's rules state."
+        )
+    return Candidate(
+        strategy="cover",
+        event=ev,
+        legs=legs,
+        payout_per_set=payout,
+        payout_max_per_set=payout_max,
+        title=f"Cross-series lock · {first.title}",
+        rationale=rationale,
+        risks=risks,
+        evidence={"series": series, "legs": [cover.describe_leg(m, side) for m, side in legs], "step_gaps": step_gaps},
+        confidence=0.98 if step_gaps else 0.99,
+        top_edge=edge,
+    )
+
+
+def screen_covers(
+    events: dict[str, Event], markets: list[Market], fee: FeeLookup, allow_step_gaps: bool
+) -> tuple[list[Candidate], list[tuple[str, str]]]:
+    """Guaranteed plays combining markets from different series that settle on the same number (see cover.py)."""
+    out: list[Candidate] = []
+    rejected: list[tuple[str, str]] = []
+    for uni in cover.universes(markets):
+        found = []
+        best = cover.cheapest_cover(cover.positions(uni, fee), cover.reporting_unit(uni), allow_step_gaps)
+        if best is not None:
+            legs = [(p.market, p.side) for p in best.legs]
+            found.append((ONE, Decimal(len(legs)), ONE - best.cost, legs, best.step_gaps))
+        for cost, legs in cover.double_covers(uni, fee):
+            found.append((Decimal(2), Decimal(3), Decimal(2) - cost, legs, 0))
+        for payout, payout_max, edge, legs, gaps in found:
+            if edge <= SCREEN_MARGIN or len({m.event_ticker for m, _ in legs}) < 2:
+                continue
+            problem = cover.settlement_clause_problem(legs)
+            if problem:
+                rejected.append((legs[0][0].event_ticker, f"cross-series cover: {problem}"))
+                continue
+            out.append(_cover_candidate(events, legs, payout, payout_max, edge, gaps))
+    return out, rejected
+
+
 # ----------------------------------------------------------------------------------------------- verification
 @dataclass
 class VerifyContext:
@@ -455,6 +523,24 @@ def near_misses(
                     "edge": float(edge),
                     "legs": 2,
                     "detail": f"{b.yes_sub_title} vs {a.yes_sub_title}",
+                }
+            )
+    for uni in cover.universes(markets):
+        best = cover.cheapest_cover(cover.positions(uni, fee), cover.reporting_unit(uni), allow_step_gaps)
+        options = []
+        if best is not None and len({p.market.event_ticker for p in best.legs}) >= 2:
+            options.append((ONE - best.cost, [(p.market, p.side) for p in best.legs]))
+        options += [(Decimal(2) - c, legs) for c, legs in cover.double_covers(uni, fee)]
+        if options:
+            edge, legs = max(options, key=lambda o: o[0])
+            rows.append(
+                {
+                    "strategy": "cover",
+                    "event_ticker": legs[0][0].event_ticker,
+                    "title": legs[0][0].title,
+                    "edge": float(edge),
+                    "legs": len(legs),
+                    "detail": " + ".join(f"{side.upper()} {m.yes_sub_title}" for m, side in legs),
                 }
             )
     rows.sort(key=lambda r: r["edge"], reverse=True)

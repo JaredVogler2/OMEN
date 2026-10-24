@@ -33,7 +33,7 @@ from omen.watchdog import check_fee_document
 
 log = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
-LOCK_STRATEGIES = {"no_basket", "ladder", "yes_partition"}
+LOCK_STRATEGIES = {"no_basket", "ladder", "yes_partition", "cover"}
 
 
 class ModelStrategy(Protocol):

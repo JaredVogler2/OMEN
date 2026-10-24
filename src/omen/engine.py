@@ -21,6 +21,7 @@ from omen.strategies.lock import (
     VerifyContext,
     basket_event_prescreen,
     explain_failure,
+    screen_covers,
     screen_ladders,
     screen_no_baskets,
     screen_yes_partitions,
@@ -235,6 +236,10 @@ class Engine:
             candidates += screen_ladders(self.events, list(self.markets.values()), self.fee_for)
         if lock.enable_yes_partition:
             c, r = screen_yes_partitions(self.events, by_event, self.fee_for, lock.allow_step_gap_partitions)
+            candidates += c
+            rejected += r
+        if lock.enable_cover:
+            c, r = screen_covers(self.events, list(self.markets.values()), self.fee_for, lock.allow_step_gap_partitions)
             candidates += c
             rejected += r
         candidates.sort(key=lambda c: c.top_edge, reverse=True)
