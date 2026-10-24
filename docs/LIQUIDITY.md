@@ -204,6 +204,22 @@ Without the filter, people dumping the loser all day cost $21.87 per decided mar
 filter gives up a third of the reward and cuts the fill cost by more than four fifths. The result holds in both halves
 of the sample and across filter settings from 0.25 to 1.0.
 
+**Closer to the close.** A dead-side bid loses at most 1¢ a contract, so it gets its own stop,
+`dead_side_stop_before_close_minutes`. The default is 6 hours; cheap-side quotes keep 12 hours. With the filter on,
+the replay gave these totals:
+
+| Stop before close | Net per decided market-day (95%) | Older half, total | Newer half, total |
+|---|---|---|---|
+| 12 h | +$3.52 (+$1.84, +$5.95) | +$8,357 | +$11,824 |
+| **6 h (default)** | +$4.16 (+$1.80, +$7.69) | +$7,955 | +$16,828 |
+| 3 h | +$4.06 (+$1.66, +$8.11) | +$7,678 | +$16,842 |
+| 1 h | +$4.58 (+$1.54, +$10.21) | +$7,041 | +$20,947 |
+
+* **Every stop pays:** all four make money in both halves.
+* **Shorter stops are uneven:** each step shorter costs the older half a little and helps the newer half more.
+* **Why 6 hours:** it adds 22% over 12 hours and gives up less than 5% in the older half. The 1-hour gain comes mostly
+  from the newer half alone, so it isn't used.
+
 **How to read these numbers:**
 
 * **Fills, worst case:** our bid absorbs every sale.

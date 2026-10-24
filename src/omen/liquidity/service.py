@@ -259,20 +259,19 @@ class LiquidityService:
 
     def _desired(self, now: datetime, held: dict[str, dict[str, list[float]]]) -> list[Quote]:
         """Quotes for every eligible market, the best reward per dollar first, until the capital budget is used."""
-        stop = timedelta(minutes=self.cfg.stop_before_close_minutes)
         best: dict[tuple[str, str], tuple[float, Quote]] = {}
 
-        def usable(p: Program) -> OrderBook | None:
+        def usable(p: Program, stop_minutes: int) -> OrderBook | None:
             m = self.markets.get(p.ticker)
             book = self.books.get(p.ticker)
             if m is None or book is None or not m.tradable:
                 return None
-            if m.close_time is not None and m.close_time - now < stop:
+            if m.close_time is not None and m.close_time - now < timedelta(minutes=stop_minutes):
                 return None
             return book
 
         for p in self.programs:
-            book = usable(p)
+            book = usable(p, self.cfg.stop_before_close_minutes)
             if book is None:
                 continue
             cost = {side: v[1] for side, v in held.get(p.ticker, {}).items()}
@@ -283,7 +282,7 @@ class LiquidityService:
                 best[(q.ticker, q.side)] = (rate / max(q.price * q.size, 1e-9), q)
         backfills = 0
         for p in self.dead_programs:
-            book = usable(p)
+            book = usable(p, self.cfg.dead_side_stop_before_close_minutes)
             if book is None:
                 continue
             cost = {side: v[1] for side, v in held.get(p.ticker, {}).items()}

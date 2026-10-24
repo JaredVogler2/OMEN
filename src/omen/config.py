@@ -190,6 +190,9 @@ class LiquiditySettings:
     # reward the bid earns; with under 30 minutes of such bids seen, assume dead_side_flow_prior contracts a minute
     dead_side_max_flow_ratio: float = 0.5
     dead_side_flow_prior: float = 1.0
+    # a dead-side bid loses at most 1c a contract, so it may rest closer to the close than cheap-side quotes: with
+    # the flow filter, stops of 12, 6, 3 and 1 h all made money in both halves of the replay; 6 h added 22% over 12 h
+    dead_side_stop_before_close_minutes: int = 360
     summary_every_hours: int = 6
 
 

@@ -246,6 +246,7 @@ class FakeKalshi:
         self.trades: list[dict] = []
         self.history: list[dict] = []  # trades returned for a single-market query (flow backfill)
         self.candles: list[dict] = []
+        self.close = "2026-11-01T00:00:00Z"
         self.book = {"yes_dollars": [["0.0500", "500.00"]], "no_dollars": [["0.9300", "2000.00"]]}
 
     def handler(self, request: httpx.Request) -> httpx.Response:
@@ -296,7 +297,7 @@ class FakeKalshi:
                             "event_ticker": "KXRT-FILM",
                             "status": self.status,
                             "result": self.result,
-                            "close_time": "2026-11-01T00:00:00Z",
+                            "close_time": self.close,
                             "market_type": "binary",
                         }
                         for t in q.get("tickers", [""])[0].split(",")
@@ -543,3 +544,15 @@ def test_service_backfills_flow_history_before_completing_a_dead_side(tmp_path):
     st = svc.step()
     assert svc.flow.seeded("KXRT-FILM-90")
     assert st["dead_quotes"] == 0  # without history the prior (1 contract a minute) would have allowed the bid
+
+
+def test_dead_sides_rest_closer_to_the_close_than_cheap_side_quotes(tmp_path):
+    fake = FakeKalshi()
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+    fake.close = (T0 + timedelta(hours=8)).isoformat().replace("+00:00", "Z")
+    svc, _ = service(tmp_path, fake)
+    assert svc.cfg.stop_before_close_minutes == 720 and svc.cfg.dead_side_stop_before_close_minutes == 360
+    assert svc.step()["dead_quotes"] == 1  # 8 h before close: inside the 12 h stop, outside the 6 h dead-side stop
+    svc.cfg.dead_side_stop_before_close_minutes = 720
+    fake.now = T0 + timedelta(minutes=1)
+    assert svc.step()["dead_quotes"] == 0
