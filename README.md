@@ -20,8 +20,8 @@ one. Kalshi pays about $180,000 a day to people who keep resting orders in its b
 It counts every reward, fill and settlement. Here is what the evidence on settled markets says:
 
 * **Cheap-side quoting** at the best bid loses more on fills than the average reward pays.
-* **The 1¢ dead-side bids** with that filter netted +$3.56 per decided market-day (95% interval +$1.66 to +$6.24) on
-  5,062 decided market-days.
+* **The 1¢ dead-side bids** with that filter netted +$3.72 per decided market-day (95% interval +$2.01 to +$6.07) on
+  6,280 decided market-days.
 
 Rewards are formula estimates until a live account shows Kalshi's actual payouts. OMEN runs in paper mode until you
 switch it to live ([docs/LIQUIDITY.md](docs/LIQUIDITY.md)).

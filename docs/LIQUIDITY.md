@@ -117,8 +117,8 @@ can earn or lose.
 
 ### 4. Realized settlement on a broad sample (the sobering part)
 
-The 1-hour mark-outs above are favorable, but **settlement** is what pays. The policy was replayed on 5,215 settled
-rewarded markets across 1,245 series, plus all 353 Trump-approval markets:
+The 1-hour mark-outs above are favorable, but **settlement** is what pays. The policy was replayed on 7,054 settled
+rewarded markets across 1,286 series, plus all 353 Trump-approval markets:
 
 * **Sample:** up to 6 random markets per series, closing between October 2025 and October 2026, fetched from Kalshi's
   live and historical endpoints.
@@ -128,11 +128,11 @@ rewarded markets across 1,245 series, plus all 353 Trump-approval markets:
 
 | Sample | Markets | Series | Fills | Settled fill P&L (95%) |
 |---|---|---|---|---|
-| All except Trump approval | 5,215 | 1,245 | 9,546 | **−2.3¢ (−3.5, −1.1)** |
-| …closed before 2026-09-08 | 2,606 | 822 | 6,729 | −3.8¢ (−5.7, −1.9) |
-| …closed after | 2,609 | 609 | 2,817 | −0.1¢ (−1.2, +1.1) |
-| …scheduled-data categories (economics, financials, weather, commodities, crypto) | 2,105 | 549 | 3,051 | −1.5¢ (−3.2, +0.1) |
-| …announcement and decision categories | 3,212 | 701 | 6,704 | −2.8¢ (−4.4, −1.2) |
+| All except Trump approval | 7,054 | 1,286 | 13,741 | **−2.6¢ (−3.9, −1.6)** |
+| …older half (by close date) | 3,527 | 830 | 10,017 | −4.2¢ (−6.3, −2.4) |
+| …newer half | 3,527 | 688 | 3,724 | −0.4¢ (−1.3, +0.5) |
+| …scheduled-data categories (economics, financials, weather, commodities, crypto) | 2,823 | 567 | 4,005 | −1.2¢ (−2.6, +0.2) |
+| …announcement and decision categories | 4,231 | 719 | 9,736 | −3.3¢ (−5.0, −1.8) |
 | Trump approval | 353 | 1 | 731 | −12.4¢ (−35.4, +10.9) |
 
 The live reward at the same placement:
@@ -153,8 +153,8 @@ The speech and show series are excluded by default.
 **Honest status:**
 
 * **Plain quoting loses.** At the best bid it loses more on fills than the average reward pays.
-* **Only high-reward markets can pay.** The `min_reward_per_contract_day` floor (2¢) keeps only markets where the
-  reward is well above the fill cost.
+* **Only high-reward markets can pay.** The `min_reward_per_contract_day` floor (4¢, above the pessimistic end of
+  the fill cost) keeps only markets where the reward is well above the fill cost.
 * **That can't be checked from history.** Kalshi publishes no historical order-book depth, so whether fills cost the
   same in those markets has to come from the forward test.
 * **Small samples mislead.** An earlier 1,429-market sample showed +0.4¢ for the same group, and the larger sample
@@ -191,16 +191,16 @@ at most `dead_side_max_flow_ratio` (default 0.5) times the reward the bid earns:
   a day).
 * **No lookahead:** the decision uses only the past.
 
-| 5,062 decided market-days in settled rewarded markets (favorite bid 97–98¢, 12+ h before close) | Net per decided market-day (95%, resampling series) |
+| 6,280 decided market-days in settled rewarded markets (favorite bid 97–98¢, 12+ h before close) | Net per decided market-day (95%, resampling series) |
 |---|---|
-| Bid whenever the side is short | −$10.52 (−$29.51, +$0.25) |
-| Filter at 1.0 | +$3.80 (+$1.87, +$6.34) |
-| **Filter at 0.5 (default)** | **+$3.56 (+$1.66, +$6.24)** |
-| Filter at 0.25 | +$3.47 (+$1.69, +$6.01) |
-| Default, markets that closed before 2026-09-08 | +$2.81 (+$1.49, +$4.53) |
-| Default, markets that closed after | +$4.59 (+$1.14, +$9.87) |
+| Bid whenever the side is short | −$9.63 (−$25.91, +$0.17) |
+| Filter at 1.0 | +$3.93 (+$2.21, +$6.19) |
+| **Filter at 0.5 (default)** | **+$3.72 (+$2.01, +$6.07)** |
+| Filter at 0.25 | +$3.62 (+$1.99, +$5.85) |
+| Default, markets that closed before 2026-09-03 | +$3.32 (+$1.78, +$5.24) |
+| Default, markets that closed after | +$4.13 (+$1.33, +$8.29) |
 
-Without the filter, people dumping the loser all day cost $21.87 per decided market-day against $11.35 of reward. The
+Without the filter, people dumping the loser all day cost $20.78 per decided market-day against $11.15 of reward. The
 filter gives up a third of the reward and cuts the fill cost by more than four fifths. The result holds in both halves
 of the sample and across filter settings from 0.25 to 1.0.
 
@@ -210,14 +210,14 @@ the replay gave these totals:
 
 | Stop before close | Net per decided market-day (95%) | Older half, total | Newer half, total |
 |---|---|---|---|
-| 12 h | +$3.52 (+$1.84, +$5.95) | +$8,357 | +$11,824 |
-| **6 h (default)** | +$4.16 (+$1.80, +$7.69) | +$7,955 | +$16,828 |
-| 3 h | +$4.06 (+$1.66, +$8.11) | +$7,678 | +$16,842 |
-| 1 h | +$4.58 (+$1.54, +$10.21) | +$7,041 | +$20,947 |
+| 12 h | +$3.72 (+$2.05, +$5.99) | +$10,789 | +$12,493 |
+| **6 h (default)** | +$4.25 (+$2.03, +$7.42) | +$10,251 | +$17,462 |
+| 3 h | +$4.16 (+$1.82, +$8.07) | +$10,021 | +$17,590 |
+| 1 h | +$4.63 (+$1.72, +$9.43) | +$9,338 | +$21,545 |
 
 * **Every stop pays:** all four make money in both halves.
 * **Shorter stops are uneven:** each step shorter costs the older half a little and helps the newer half more.
-* **Why 6 hours:** it adds 22% over 12 hours and gives up less than 5% in the older half. The 1-hour gain comes mostly
+* **Why 6 hours:** it adds 18% over 12 hours and gives up 5% in the older half. The 1-hour gain comes mostly
   from the newer half alone, so it isn't used.
 
 **How to read these numbers:**

@@ -178,9 +178,9 @@ class LiquiditySettings:
         r"15M$|^KXTEMP\w*H$|RATEH$|^KXAAAGAS|^KXDIESEL|MATCH$|^KXCRYPTOLEAD|GAME$|SPREAD|TOTAL"
         r"|MENTION|SAY|TRUTHSOCIAL|ELIMINATION|^KXVMA|NETFLIX"
     )
-    # quote only where the expected reward beats the pessimistic fill cost: settled fills cost 0.4c (-1.7, +2.6) per
-    # contract-day across 1,203 rewarded markets, so 2c per contract-day leaves a margin even at the low end
-    min_reward_per_contract_day: float = 0.02
+    # quote only where the expected reward beats the pessimistic fill cost: settled cheap-side fills cost 2.6c (1.6 to
+    # 3.9) per contract-day across 7,054 rewarded markets (docs/LIQUIDITY.md section 4), so require 4c
+    min_reward_per_contract_day: float = 0.04
     # complete the empty side of decided markets with 1c bids (see docs/LIQUIDITY.md "Dead sides"); the loss is capped
     # at 1c per contract filled and at dead_side_max_loss_usd per market
     complete_dead_sides: bool = True
@@ -191,7 +191,7 @@ class LiquiditySettings:
     dead_side_max_flow_ratio: float = 0.5
     dead_side_flow_prior: float = 1.0
     # a dead-side bid loses at most 1c a contract, so it may rest closer to the close than cheap-side quotes: with
-    # the flow filter, stops of 12, 6, 3 and 1 h all made money in both halves of the replay; 6 h added 22% over 12 h
+    # the flow filter, stops of 12, 6, 3 and 1 h all made money in both halves of the replay; 6 h added 18% over 12 h
     dead_side_stop_before_close_minutes: int = 360
     summary_every_hours: int = 6
 
