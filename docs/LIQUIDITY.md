@@ -117,33 +117,49 @@ can earn or lose.
 
 ### 4. Realized settlement on a broad sample (the sobering part)
 
-The 1-hour mark-outs above are favorable, but **settlement** is what pays. The policy was replayed on a broad random
-sample: 1,429 settled rewarded markets across 99 slow series, plus all 353 Trump-approval markets. Results are realized
-fill P&L per contract per day of resting:
+The 1-hour mark-outs above are favorable, but **settlement** is what pays. The policy was replayed on 5,215 settled
+rewarded markets across 1,245 series, plus all 353 Trump-approval markets:
 
-| Sample | Markets | Fills | Settled fill P&L (95%) | Live reward | Net |
-|---|---|---|---|---|---|
-| All slow series | 1,429 | 2,304 | **−2.5¢ (−4.7, −0.05)** | 3.6¢ mean, 0.55¢ median | marginal |
-| …except speech / insider markets and Trump approval | 1,203 | 1,316 | +0.4¢ (−1.7, +2.6) | 1.1¢ | +1.5¢ |
-| Trump approval, at the best bid | 353 | 731 | −12.4¢ (−35.4, +10.9) | 22.8¢ | +10.4¢ |
-| Trump approval, 2 ticks behind | 321 | 207 | −2.7¢ (−13.7, +9.7) | 8.1¢ | +5.5¢ |
+* **Sample:** up to 6 random markets per series, closing between October 2025 and October 2026, fetched from Kalshi's
+  live and historical endpoints.
+* **Exclusions:** the speech and insider series below are already excluded.
+* **Unit:** realized fill P&L per contract per day of resting.
+* **Intervals:** 95%, resampling whole series, because markets in one series share news.
 
-Most of the loss comes from markets that resolve on what someone says or on insider-decided outcomes:
+| Sample | Markets | Series | Fills | Settled fill P&L (95%) |
+|---|---|---|---|---|
+| All except Trump approval | 5,215 | 1,245 | 9,546 | **−2.3¢ (−3.5, −1.1)** |
+| …closed before 2026-09-08 | 2,606 | 822 | 6,729 | −3.8¢ (−5.7, −1.9) |
+| …closed after | 2,609 | 609 | 2,817 | −0.1¢ (−1.2, +1.1) |
+| …scheduled-data categories (economics, financials, weather, commodities, crypto) | 2,105 | 549 | 3,051 | −1.5¢ (−3.2, +0.1) |
+| …announcement and decision categories | 3,212 | 701 | 6,704 | −2.8¢ (−4.4, −1.2) |
+| Trump approval | 353 | 1 | 731 | −12.4¢ (−35.4, +10.9) |
 
-* Trump mentions: −23¢
-* "Trump says": −39¢
-* Truth Social: −47¢
-* VMAs: −31¢
-* Netflix top movie: −31¢
-* Big Brother eliminations: −73¢
+The live reward at the same placement:
 
-Someone usually knows the answer first. These are now excluded by default, and quotes need a formula reward of at
-least `min_reward_per_contract_day` (2¢), above the pessimistic end of the remaining fill cost.
+* **Outside Trump approval:** 1.1¢ per contract-day on average (median 0.4¢). Only about one snapshot in six reaches
+  2¢, and those average 4.5¢.
+* **Trump approval:** 22.8¢.
 
-**Honest status:** after these rules, the expected net is positive but small, and no configuration is yet positive
-at 95% confidence. Outside Trump approval, the chance that the net is positive is about 92%, and the speech/insider
-exclusion was chosen after seeing this data. Trump approval carries most of the reward, and its fill cost is too
-noisy to pin down. Keep it in paper.
+The worst losses come from markets where someone usually knows the answer first:
+
+* **Speech markets:** Trump mentions −23¢, "Trump says" −39¢, Truth Social −47¢.
+* **Award and show results:** VMAs −31¢, Netflix top movie −31¢, Big Brother eliminations −73¢.
+* **Announcements and decisions:** coach hires, draft picks, trades, government shutdown length, Iran and Hormuz news,
+  from −80¢ to −320¢.
+
+The speech and show series are excluded by default.
+
+**Honest status:**
+
+* **Plain quoting loses.** At the best bid it loses more on fills than the average reward pays.
+* **Only high-reward markets can pay.** The `min_reward_per_contract_day` floor (2¢) keeps only markets where the
+  reward is well above the fill cost.
+* **That can't be checked from history.** Kalshi publishes no historical order-book depth, so whether fills cost the
+  same in those markets has to come from the forward test.
+* **Small samples mislead.** An earlier 1,429-market sample showed +0.4¢ for the same group, and the larger sample
+  overturned it. Trust nothing here that rests on fewer than a few thousand markets.
+* **Keep this policy in paper.** Section 5 is the part that holds up.
 
 ### 5. Dead sides: completing books that pay nobody
 
@@ -162,28 +178,57 @@ only when that side is short of it:
 * **Crossing:** prices are whole cents, so while the favorite is bid at 99¢ a 1¢ bid would trade instead of resting
   (a post-only order is rejected). The bot only completes a side while the favorite's best bid is 97¢ or 98¢.
 
-The replay assumed the worst case for fills: our 1¢ bid absorbs every trade that bought the favorite at 99¢. It counts
-only the minutes when the favorite's best bid was 97–98¢ (an earlier version also counted 99¢ minutes, when the bid
-could not have rested; that overstated the decided time by 70% and understated the cost per day).
+**Measuring the flow.** A first replay charged our bid with every 99¢ favorite purchase while the market was
+decided. That understates the cost. Those purchases can only happen while someone bids 1¢ on the dead side, and the
+side we complete is the one with no such bid. The corrected replay measures sales per minute that a 1¢ bid rested (a
+"supply minute") and charges that rate on every minute we bid.
 
-| Settled rewarded markets while decided (12+ h before close, favorite bid 97–98¢) | Value |
+**The filter.** The bot bids only while a market's trailing 24 hours of sales into 1¢ bids, priced at 1¢ each, cost
+at most `dead_side_max_flow_ratio` (default 0.5) times the reward the bid earns:
+
+* **Inputs:** the rate is per supply minute and comes from the public tape (`DeadSideFlow`).
+* **Before history:** until 30 supply minutes were seen, it assumes `dead_side_flow_prior`, 1 contract a minute ($14.40
+  a day).
+* **No lookahead:** the decision uses only the past.
+
+| 5,062 decided market-days in settled rewarded markets (favorite bid 97–98¢, 12+ h before close) | Net per decided market-day (95%, resampling series) |
 |---|---|
-| Markets / decided market-days | 1,053 / 1,302 |
-| Contracts that would have filled the 1¢ bid | 1,069 per market-day |
-| Settled cost of those fills | **−$10.66 per market-day (95% interval −$13.21 to −$8.65)** |
-| Dead side won anyway | 2 of 1,053 markets |
-| Program reward while decided | $30.66 per market-day; half of it ($15.33) when our bid alone completes the target |
+| Bid whenever the side is short | −$10.52 (−$29.51, +$0.25) |
+| Filter at 1.0 | +$3.80 (+$1.87, +$6.34) |
+| **Filter at 0.5 (default)** | **+$3.56 (+$1.66, +$6.24)** |
+| Filter at 0.25 | +$3.47 (+$1.69, +$6.01) |
+| Default, markets that closed before 2026-09-08 | +$2.81 (+$1.49, +$4.53) |
+| Default, markets that closed after | +$4.59 (+$1.14, +$9.87) |
 
-Even in that worst case the reward exceeds the cost by about $4.67 per decided market-day. The fill cost is measured
-tightly because it depends only on how many people buy favorites at 99¢. The uncertain parts are the share (half the
-reward only while nobody else bids on the dead side; in the live sample that was the case in 31% of snapshots) and
-whether Kalshi pays it at all, which only a live account can confirm.
+Without the filter, people dumping the loser all day cost $21.87 per decided market-day against $11.35 of reward. The
+filter gives up a third of the reward and cuts the fill cost by more than four fifths. The result holds in both halves
+of the sample and across filter settings from 0.25 to 1.0.
 
-**Compliance caveat, plainly:** these are real, fillable, fair-priced bids that make a market meet the two-sided
-requirement the program pays for. But Kalshi's filing lets it end eligibility for activity it judges "inconsistent
-with the purpose of the Program", and liquidity in a decided market is of little use to traders. Kalshi could decide
-this does not deserve rewards. Read Kalshi's current program terms (kalshi.com/regulatory/notices) and set
-`complete_dead_sides = false` if you would rather not take that risk. It is paper-only until you go live.
+**How to read these numbers:**
+
+* **Fills, worst case:** our bid absorbs every sale.
+* **Reward, best case:** half the program reward while we bid. That needs three things: we hold the whole dead side,
+  the favorite's side reaches the target, and Kalshi pays.
+* **What history can't check:** with no historical order-book depth, the replay can't test the first two conditions.
+  The bot checks them from the live book before every bid.
+* **Why the sign should hold:** the bot bids only when completing the side pays, so reward and fill cost shrink
+  together when that state is rarer than the replay assumes. The third condition only a live account can confirm.
+
+**Paper understates dead-side fills.** Paper fills of a dead-side bid come from the real tape, which shows sales only
+while someone else bids 1¢. The flow filter uses only real 1¢ bids, as the replay does.
+
+**Compliance caveat, plainly:**
+
+* **Within the published rules:** Kalshi's help center sets no price limit on qualifying orders and does not exclude
+  1¢ bids or decided markets. It scores "every resting order that helps reach the Target Size on its side".
+* **Real bids:** these are real, fillable, fair-priced bids that make a market meet the two-sided requirement the
+  program pays for.
+* **The risk:** Kalshi's filing lets it end eligibility for activity it judges "inconsistent with the purpose of the
+  Program". Its help center says it monitors for abuse and can revoke participation. Liquidity in a decided market is
+  of little use to traders, so Kalshi could decide this does not deserve rewards.
+* **What to do:** read Kalshi's current program terms (kalshi.com/regulatory/notices), and set
+  `complete_dead_sides = false` if you would rather not take that risk.
+* **Status:** it is paper-only until you go live.
 
 ### 6. Forward paper test on live data
 

@@ -186,6 +186,10 @@ class LiquiditySettings:
     complete_dead_sides: bool = True
     dead_side_max_loss_usd: float = 50.0
     dead_side_exclude_series: str = r"15M$|^KXTEMP\w*H$|RATEH$|^KXCRYPTOLEAD"
+    # bid only while the trailing 24 h of sales into 1c dead-side bids, at 1c each, cost at most this share of the
+    # reward the bid earns; with under 30 minutes of such bids seen, assume dead_side_flow_prior contracts a minute
+    dead_side_max_flow_ratio: float = 0.5
+    dead_side_flow_prior: float = 1.0
     summary_every_hours: int = 6
 
 

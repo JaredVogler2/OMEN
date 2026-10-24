@@ -468,3 +468,35 @@ def test_paper_venue_rejects_a_quote_that_would_cross_like_post_only():
     assert venue.orders == {}
     venue.sync([Quote("M", "no", 0.01, 50)], {"M": book("M", yes=[(0.98, 100)], no=[])}, T0)
     assert ("M", "no") in venue.orders
+
+
+def test_dead_side_flow_is_measured_per_minute_a_1c_bid_rested():
+    from omen.liquidity.maker import DeadSideFlow
+
+    f = DeadSideFlow()
+    assert f.rate("M", T0, prior=1.0) == 1.0
+    f.observe("M", T0, 20, 10)
+    assert f.rate("M", T0, prior=1.0) == 1.0  # under 30 minutes of 1c bids seen: still the prior
+    f.observe("M", T0 + timedelta(minutes=20), 20, 30)
+    assert f.rate("M", T0 + timedelta(minutes=20), prior=1.0) == pytest.approx(1.0)  # 40 contracts in 40 minutes
+    f.observe("M", T0 + timedelta(minutes=40), 0, 0)  # no 1c bid and no sales: nothing learned
+    f.observe("M", T0 + timedelta(minutes=60), 20, 0)
+    assert f.rate("M", T0 + timedelta(minutes=60), prior=1.0) == pytest.approx(40 / 60)
+    # a day later the first observation has aged out: 40 minutes left, 30 contracts
+    assert f.rate("M", T0 + timedelta(hours=24, minutes=10), prior=7.0) == pytest.approx(30 / 40)
+
+
+def test_service_stops_completing_a_dead_side_that_sellers_hit_faster_than_the_reward_pays(tmp_path):
+    fake = FakeKalshi()
+    # someone else rests 50 NO at 1c, short of the 1000 target: the side still needs completing
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": [["0.0100", "50.00"]]}
+    svc, _ = service(tmp_path, fake)
+    svc.flow.min_supply_minutes = 2
+    st = svc.step()
+    assert ("KXRT-FILM-90", "no") in svc.venue.orders and st["dead_quotes"] == 1  # the prior costs less than the reward
+    for i in range(1, 3):
+        fake.now = T0 + timedelta(minutes=i)
+        fake.trades = [trade("KXRT-FILM-90", fake.now - timedelta(seconds=30), 0.99, "yes", 100, f"s{i}")]
+        st = svc.step()
+    # 100 contracts a minute sold at 1c cost $1,440 a day, far more than the ~$48 a day the bid earns
+    assert ("KXRT-FILM-90", "no") not in svc.venue.orders and st["dead_quotes"] == 0

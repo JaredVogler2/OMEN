@@ -6,8 +6,9 @@ from __future__ import annotations
 import logging
 import math
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from omen.http import HttpError
@@ -77,6 +78,17 @@ class QuotePolicy:
         return out
 
 
+def decided(book: OrderBook) -> tuple[str, str] | None:
+    """(dead side, live side) once one side is bid at 97c or more and the other at 2c or less."""
+    for dead, live in (("yes", "no"), ("no", "yes")):
+        lv_dead, lv_live = levels(book, dead), levels(book, live)
+        best_dead = lv_dead[0][0] if lv_dead else 0.0
+        best_live = lv_live[0][0] if lv_live else 0.0
+        if best_dead <= 0.02 and best_live >= 0.97:
+            return dead, live
+    return None
+
+
 def dead_side_quote(
     book: OrderBook, target: float, discount: float, held_cost: dict[str, float], max_loss: float
 ) -> Quote | None:
@@ -89,19 +101,54 @@ def dead_side_quote(
     prices are whole cents, so a 1c bid against a 99c bid would cross and a post-only order is rejected."""
     from omen.liquidity.scoring import side_score
 
-    for dead, live in (("yes", "no"), ("no", "yes")):
-        lv_dead, lv_live = levels(book, dead), levels(book, live)
-        best_dead = lv_dead[0][0] if lv_dead else 0.0
-        best_live = lv_live[0][0] if lv_live else 0.0
-        if best_dead > 0.02 or best_live < 0.97:
-            continue
-        if side_score(lv_dead, target, discount).met or not side_score(lv_live, target, discount).met:
-            return None  # already paid (or can't be completed from this side alone)
-        if best_live + 0.01 >= 1 - 1e-9:
-            return None
-        size = min(math.ceil(target), math.floor((max_loss - held_cost.get(dead, 0.0)) / 0.01 + 1e-9))
-        return Quote(book.ticker, dead, 0.01, size) if size >= 1 else None
-    return None
+    sides = decided(book)
+    if sides is None:
+        return None
+    dead, live = sides
+    lv_dead, lv_live = levels(book, dead), levels(book, live)
+    if side_score(lv_dead, target, discount).met or not side_score(lv_live, target, discount).met:
+        return None  # already paid (or can't be completed from this side alone)
+    if lv_live[0][0] + 0.01 >= 1 - 1e-9:
+        return None
+    size = min(math.ceil(target), math.floor((max_loss - held_cost.get(dead, 0.0)) / 0.01 + 1e-9))
+    return Quote(book.ticker, dead, 0.01, size) if size >= 1 else None
+
+
+def dead_side_sales(trade: dict, dead: str) -> float:
+    """Contracts a public trade sold into a 1c bid on the dead side (a favorite bought at 99c), else 0."""
+    _, _, yes_price, taker, count, _ = trade_fields(trade)
+    if dead == "no" and taker == "yes" and yes_price >= 0.99 - 1e-9:
+        return count
+    if dead == "yes" and taker == "no" and yes_price <= 0.01 + 1e-9:
+        return count
+    return 0.0
+
+
+@dataclass
+class DeadSideFlow:
+    """Contracts sold into 1c dead-side bids per minute that such a bid rested, over a trailing window.
+
+    The tape only shows those sales while someone bids 1c on the dead side (with no bid there is nobody to sell to),
+    so the rate is per *supply minute*, and a 1c bid of ours would face it every minute it rests. Markets where that
+    flow costs more than the reward lost money in the settled replay; the rest made money."""
+
+    window: timedelta = timedelta(hours=24)
+    min_supply_minutes: float = 30.0
+    _obs: dict[str, deque] = field(default_factory=dict)  # ticker -> (time, supply minutes, contracts sold)
+
+    def observe(self, ticker: str, now: datetime, supply_minutes: float, contracts: float) -> None:
+        if supply_minutes > 0 or contracts > 0:
+            self._obs.setdefault(ticker, deque()).append((now, supply_minutes, contracts))
+
+    def rate(self, ticker: str, now: datetime, prior: float) -> float:
+        """Contracts per supply minute over the window, or ``prior`` while too little supply was seen."""
+        obs = self._obs.get(ticker)
+        while obs and now - obs[0][0] > self.window:
+            obs.popleft()
+        supply = sum(o[1] for o in obs) if obs else 0.0
+        if supply < self.min_supply_minutes:
+            return prior
+        return sum(o[2] for o in obs) / supply
 
 
 @dataclass

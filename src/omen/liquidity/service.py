@@ -14,7 +14,17 @@ from omen.http import HttpError
 from omen.kalshi.client import KalshiClient
 from omen.kalshi.models import Market, OrderBook
 from omen.ledger import Ledger
-from omen.liquidity.maker import Fill, Quote, QuotePolicy, Venue, dead_side_quote, levels
+from omen.liquidity.maker import (
+    DeadSideFlow,
+    Fill,
+    Quote,
+    QuotePolicy,
+    Venue,
+    dead_side_quote,
+    dead_side_sales,
+    decided,
+    levels,
+)
 from omen.liquidity.programs import Program, eligible, fetch_active, series_of
 from omen.liquidity.scoring import snapshot
 
@@ -74,6 +84,8 @@ class LiquidityService:
         self._last: datetime | None = None
         self._rates: dict[str, float] = {}
         self._tape_since: datetime | None = None
+        self.flow = DeadSideFlow()
+        self._flow_at: datetime | None = None
         self._killed = False
         self._last_summary: datetime | None = None
         self.last_error: str | None = None
@@ -108,7 +120,9 @@ class LiquidityService:
         held = self.ledger.lp_positions(self.mode)
         tickers = sorted({p.ticker for p in self.programs} | {p.ticker for p in self.dead_programs} | set(held))
         self.books = self.client.orderbooks(tickers) if tickers else {}
-        tape = self._tape(now) if self.mode == "paper" else []
+        # paper fills come from the public tape; dead-side completion also needs it (live) to measure 1c sales
+        tape = self._tape(now) if self.mode == "paper" or self.cfg.complete_dead_sides else []
+        self._observe_flow(now, tape)
         fills = self.venue.fills(tape, now)
         new = [f for f in fills if self.ledger.lp_record_fill(self.mode, f)]
         if new:
@@ -124,6 +138,7 @@ class LiquidityService:
         stats.update(
             programs=len(self.programs),
             quotes=len(self.venue.orders),
+            dead_quotes=sum(1 for o in self.venue.orders.values() if o.price <= 0.01 + 1e-9),
             resting_usd=round(sum(o.price * o.size for o in self.venue.orders.values()), 2),
             inventory_usd=round(sum(v[1] for sides in held.values() for v in sides.values()), 2),
             reward_per_hour=round(sum(self._rates.values()) * 3600, 4),
@@ -174,7 +189,7 @@ class LiquidityService:
     def _tape(self, now: datetime) -> list[dict]:
         """Public trades since the last cycle, exchange-wide (a few requests instead of one per market)."""
         since = self._tape_since or (now - timedelta(seconds=self.cfg.cycle_seconds))
-        ours = {o.ticker for o in self.venue.orders.values()}
+        ours = {o.ticker for o in self.venue.orders.values()} | {p.ticker for p in self.dead_programs}
         out: list[dict] = []
         cursor = ""
         for _ in range(MAX_TAPE_PAGES):
@@ -192,6 +207,26 @@ class LiquidityService:
                 break
         self._tape_since = now
         return out
+
+    def _observe_flow(self, now: datetime, tape: list[dict]) -> None:
+        """Record, for every decided market, how much was sold into 1c dead-side bids and for how long one rested."""
+        cycle = timedelta(seconds=self.cfg.cycle_seconds)
+        elapsed = min(now - self._flow_at, 3 * cycle) if self._flow_at else cycle
+        self._flow_at = now
+        by_ticker: dict[str, list[dict]] = {}
+        for t in tape:
+            by_ticker.setdefault(t.get("ticker", ""), []).append(t)
+        for p in self.dead_programs:
+            book = self.books.get(p.ticker)
+            sides = decided(book) if book is not None else None
+            if sides is None:
+                continue
+            dead = sides[0]
+            sold = sum(dead_side_sales(t, dead) for t in by_ticker.get(p.ticker, []))
+            dead_levels = levels(book, dead)
+            # a sale proves a 1c bid rested during the interval even if it was used up by the end
+            supply = sold > 0 or any(price <= 0.01 + 1e-9 for price, _ in dead_levels)
+            self.flow.observe(p.ticker, now, elapsed.total_seconds() / 60 if supply else 0.0, sold)
 
     def _desired(self, now: datetime, held: dict[str, dict[str, list[float]]]) -> list[Quote]:
         """Quotes for every eligible market, the best reward per dollar first, until the capital budget is used."""
@@ -226,6 +261,9 @@ class LiquidityService:
             if q is None:
                 continue
             rate = reward_rate(p, book, {q.side: (q.price, q.size)})
+            flow = self.flow.rate(p.ticker, now, self.cfg.dead_side_flow_prior)
+            if flow * 1440 * 0.01 > self.cfg.dead_side_max_flow_ratio * rate * 86400:
+                continue  # 1c sales here would cost more than the reward: such markets lost money in the replay
             score = rate / max(q.price * q.size, 1e-9)
             if rate > 0 and score > best.get((q.ticker, q.side), (0.0, q))[0]:
                 best[(q.ticker, q.side)] = (score, q)
