@@ -425,10 +425,12 @@ def test_default_exclusions_cover_speech_and_insider_markets():
 def test_dead_side_completion_bids_1c_only_where_the_side_is_short():
     from omen.liquidity.maker import dead_side_quote
 
-    decided = book("M", yes=[(0.99, 1500), (0.98, 700)], no=[])
+    decided = book("M", yes=[(0.98, 1500), (0.97, 700)], no=[])
     assert dead_side_quote(decided, 1000, 0.5, {}, 50) == Quote("M", "no", 0.01, 1000)
+    crossed = book("M", yes=[(0.99, 1500), (0.98, 700)], no=[])
+    assert dead_side_quote(crossed, 1000, 0.5, {}, 50) is None  # 1c + 99c = $1: the bid would trade, not rest
     assert dead_side_quote(decided, 1000, 0.5, {"no": 45.0}, 50) == Quote("M", "no", 0.01, 500)  # loss cap
-    paid = book("M", yes=[(0.99, 1500)], no=[(0.01, 3000)])
+    paid = book("M", yes=[(0.98, 1500)], no=[(0.01, 3000)])
     assert dead_side_quote(paid, 1000, 0.5, {}, 50) is None  # already reaches the target: nothing to complete
     open_market = book("M", yes=[(0.60, 1500)], no=[(0.38, 3000)])
     assert dead_side_quote(open_market, 1000, 0.5, {}, 50) is None
@@ -436,7 +438,7 @@ def test_dead_side_completion_bids_1c_only_where_the_side_is_short():
 
 def test_service_completes_a_dead_side_and_earns_half_the_reward(tmp_path):
     fake = FakeKalshi()
-    fake.book = {"yes_dollars": [["0.9900", "2000.00"]], "no_dollars": []}
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
     svc, ledger = service(tmp_path, fake)
     st = svc.step()
     o = svc.venue.orders[("KXRT-FILM-90", "no")]
@@ -447,3 +449,22 @@ def test_service_completes_a_dead_side_and_earns_half_the_reward(tmp_path):
     fake.trades = [trade("KXRT-FILM-90", T0 + timedelta(seconds=30), 0.99, "yes", 300, "f1")]
     svc.step()
     assert ledger.lp_positions("paper")["KXRT-FILM-90"]["no"] == [300.0, 3.0]
+
+
+def test_dead_side_reward_accrues_in_markets_excluded_from_normal_quoting(tmp_path):
+    fake = FakeKalshi()
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+    svc, _ = service(tmp_path, fake)
+    svc.cfg.exclude_series = "^KXRT"
+    st = svc.step()
+    assert not svc.programs and ("KXRT-FILM-90", "no") in svc.venue.orders
+    assert st["reward_per_hour"] == pytest.approx(100 / 24 * 0.5, rel=1e-3)
+
+
+def test_paper_venue_rejects_a_quote_that_would_cross_like_post_only():
+    venue = PaperVenue()
+    b = book("M", yes=[(0.99, 100)], no=[])
+    venue.sync([Quote("M", "no", 0.01, 50)], {"M": b}, T0)
+    assert venue.orders == {}
+    venue.sync([Quote("M", "no", 0.01, 50)], {"M": book("M", yes=[(0.98, 100)], no=[])}, T0)
+    assert ("M", "no") in venue.orders

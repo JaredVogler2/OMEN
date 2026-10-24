@@ -85,7 +85,8 @@ def dead_side_quote(
     Rewards pay only while BOTH sides reach Target Size. Once one side trades at 97c or more, the other is worth about
     1c and often has too few bids, so nobody is paid. A 1c bid on that side is worth what it costs, can lose at most
     1c per contract when it fills (it fills when someone buys the favorite at 99c), and makes the market pay rewards
-    again. Only a side that is short of the target is completed."""
+    again. Only a side that is short of the target is completed, and only while the favorite's best bid is below 99c:
+    prices are whole cents, so a 1c bid against a 99c bid would cross and a post-only order is rejected."""
     from omen.liquidity.scoring import side_score
 
     for dead, live in (("yes", "no"), ("no", "yes")):
@@ -96,6 +97,8 @@ def dead_side_quote(
             continue
         if side_score(lv_dead, target, discount).met or not side_score(lv_live, target, discount).met:
             return None  # already paid (or can't be completed from this side alone)
+        if best_live + 0.01 >= 1 - 1e-9:
+            return None
         size = min(math.ceil(target), math.floor((max_loss - held_cost.get(dead, 0.0)) / 0.01 + 1e-9))
         return Quote(book.ticker, dead, 0.01, size) if size >= 1 else None
     return None
@@ -121,6 +124,12 @@ class Venue(Protocol):
     def fills(self, trades: list[dict], now: datetime) -> list[Fill]: ...
 
     def cancel_all(self) -> None: ...
+
+
+def crosses(book: OrderBook, q: Quote) -> bool:
+    """A bid crosses when it and the other side's best bid add up to a dollar or more (prices are whole cents)."""
+    other = levels(book, "no" if q.side == "yes" else "yes")
+    return bool(other) and q.price + other[0][0] >= 1 - 1e-9
 
 
 def _keep(order: Resting | None, q: Quote) -> bool:
@@ -156,6 +165,9 @@ class PaperVenue:
             if _keep(self.orders.get(key), q):
                 continue
             book = books.get(q.ticker)
+            if book is not None and crosses(book, q):
+                self.orders.pop(key, None)  # the exchange rejects a post-only order that would trade
+                continue
             ahead = sum(s for p, s in levels(book, q.side) if abs(p - q.price) < 1e-9) if book else 0.0
             self.orders[key] = Resting(
                 q.ticker, q.side, q.price, float(q.size), ahead, f"paper-{uuid.uuid4().hex[:10]}", now

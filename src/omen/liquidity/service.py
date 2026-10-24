@@ -255,7 +255,7 @@ class LiquidityService:
         by_ticker: dict[str, dict[str, tuple[float, float]]] = {}
         for o in self.venue.orders.values():
             by_ticker.setdefault(o.ticker, {})[o.side] = (o.price, o.size)
-        programs = {p.ticker: p for p in self.programs}
+        programs = {p.ticker: p for p in [*self.dead_programs, *self.programs]}
         for ticker, ours in by_ticker.items():
             p, book = programs.get(ticker), self.books.get(ticker)
             if p is not None and book is not None:

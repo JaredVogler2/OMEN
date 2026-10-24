@@ -159,20 +159,25 @@ only when that side is short of it:
 * **Downside:** it can lose at most 1¢ per contract. It fills when someone buys the favorite at 99¢.
 * **Upside:** if the "dead" outcome happens anyway, it pays 99¢.
 * **Cap:** `dead_side_max_loss_usd` (default $50) limits inventory per market.
+* **Crossing:** prices are whole cents, so while the favorite is bid at 99¢ a 1¢ bid would trade instead of resting
+  (a post-only order is rejected). The bot only completes a side while the favorite's best bid is 97¢ or 98¢.
 
-The replay assumed the worst case for fills: our 1¢ bid absorbs every trade that bought the favorite at 99¢.
+The replay assumed the worst case for fills: our 1¢ bid absorbs every trade that bought the favorite at 99¢. It counts
+only the minutes when the favorite's best bid was 97–98¢ (an earlier version also counted 99¢ minutes, when the bid
+could not have rested; that overstated the decided time by 70% and understated the cost per day).
 
-| Settled rewarded markets while decided (12+ h before close) | Value |
+| Settled rewarded markets while decided (12+ h before close, favorite bid 97–98¢) | Value |
 |---|---|
-| Markets / decided market-days | 1,175 / 2,239 |
-| Contracts that would have filled the 1¢ bid | 640 per market-day |
-| Settled cost of those fills | **−$6.39 per market-day (95% interval −$7.69 to −$5.23)** |
-| Dead side won anyway | 2 of 1,175 markets |
-| Program reward while decided | $25.58 per market-day; half of it ($12.79) when our bid alone completes the target |
+| Markets / decided market-days | 1,053 / 1,302 |
+| Contracts that would have filled the 1¢ bid | 1,069 per market-day |
+| Settled cost of those fills | **−$10.66 per market-day (95% interval −$13.21 to −$8.65)** |
+| Dead side won anyway | 2 of 1,053 markets |
+| Program reward while decided | $30.66 per market-day; half of it ($15.33) when our bid alone completes the target |
 
-The fill cost is measured tightly because it depends only on how many people buy favorites at 99¢. The uncertain
-part is the share: half the reward only while nobody else bids on the dead side. In the live sample that was the case
-in 31% of snapshots.
+Even in that worst case the reward exceeds the cost by about $4.67 per decided market-day. The fill cost is measured
+tightly because it depends only on how many people buy favorites at 99¢. The uncertain parts are the share (half the
+reward only while nobody else bids on the dead side; in the live sample that was the case in 31% of snapshots) and
+whether Kalshi pays it at all, which only a live account can confirm.
 
 **Compliance caveat, plainly:** these are real, fillable, fair-priced bids that make a market meet the two-sided
 requirement the program pays for. But Kalshi's filing lets it end eligibility for activity it judges "inconsistent
