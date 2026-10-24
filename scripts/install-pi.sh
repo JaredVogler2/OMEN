@@ -4,6 +4,7 @@
 #   scripts/install-pi.sh                     # install/update, enable and start
 #   scripts/install-pi.sh --with-backup-timer # also a nightly ledger backup
 #   scripts/install-pi.sh --with-atlas-timer  # also a weekly calibration-atlas rebuild (feeds calibration edges)
+#   scripts/install-pi.sh --with-lp           # also the liquidity-reward quoting service (paper unless configured live)
 #   scripts/install-pi.sh --with-exec         # also install the signing extra (only for demo/live execution)
 #   scripts/install-pi.sh --no-start          # render and enable, but do not (re)start
 #
@@ -17,6 +18,7 @@ STATE_DIR="${OMEN_STATE_DIR:-$RUN_HOME/.omen}"
 ENV_FILE="${OMEN_ENV_FILE:-$RUN_HOME/.config/omen/omen.env}"
 BACKUP=0
 ATLAS=0
+LP=0
 EXEC=0
 START=1
 
@@ -24,9 +26,10 @@ for arg in "$@"; do
   case "$arg" in
     --with-backup-timer) BACKUP=1 ;;
     --with-atlas-timer) ATLAS=1 ;;
+    --with-lp) LP=1 ;;
     --with-exec) EXEC=1 ;;
     --no-start) START=0 ;;
-    -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -70,8 +73,12 @@ if [ "$ATLAS" = 1 ]; then
   render deploy/systemd/omen-atlas.service.in | sudo tee /etc/systemd/system/omen-atlas.service >/dev/null
   sudo install -m 644 deploy/systemd/omen-atlas.timer /etc/systemd/system/omen-atlas.timer
 fi
+if [ "$LP" = 1 ]; then
+  render deploy/systemd/omen-lp.service.in | sudo tee /etc/systemd/system/omen-lp.service >/dev/null
+fi
 sudo systemctl daemon-reload
 sudo systemctl enable omen.service >/dev/null
+[ "$LP" = 1 ] && sudo systemctl enable omen-lp.service >/dev/null
 [ "$BACKUP" = 1 ] && sudo systemctl enable --now omen-backup.timer >/dev/null
 [ "$ATLAS" = 1 ] && sudo systemctl enable --now omen-atlas.timer >/dev/null
 
@@ -85,6 +92,10 @@ set -e
 if [ "$START" = 1 ]; then
   sudo systemctl restart omen.service
   echo "OMEN is running. Logs: journalctl -u omen -f"
+  if [ "$LP" = 1 ]; then
+    sudo systemctl restart omen-lp.service
+    echo "Liquidity quoting is running. Logs: journalctl -u omen-lp -f   Results: omen lp status"
+  fi
 else
   echo "Enabled but not started (--no-start). Start with: sudo systemctl start omen"
 fi

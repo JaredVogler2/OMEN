@@ -1,4 +1,4 @@
-import { Bitcoin, ChartLine, LogOut, Moon, Radar, Receipt, ScanSearch, Server, Sun, Target } from "lucide-react";
+import { Bitcoin, ChartLine, Droplets, LogOut, Moon, Radar, Receipt, ScanSearch, Server, Sun, Target } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { type Dashboard, api, onUnauthorized } from "./api";
 import { Logo } from "./components/Logo";
@@ -11,6 +11,7 @@ import Fees from "./pages/Fees";
 import Login from "./pages/Login";
 import Performance from "./pages/Performance";
 import Plays from "./pages/Plays";
+import Rewards from "./pages/Rewards";
 import Scan from "./pages/Scan";
 import System from "./pages/System";
 
@@ -20,6 +21,7 @@ const NAV = [
   { path: "edges", label: "Edges", icon: Target },
   { path: "fees", label: "Fees", icon: Receipt },
   { path: "crypto", label: "Crypto model", icon: Bitcoin },
+  { path: "rewards", label: "Rewards", icon: Droplets },
   { path: "performance", label: "Performance", icon: ChartLine },
   { path: "system", label: "System", icon: Server },
 ] as const;
@@ -86,6 +88,9 @@ function Shell({ onLogout }: { onLogout: () => void }) {
       break;
     case "crypto":
       page = <Crypto />;
+      break;
+    case "rewards":
+      page = <Rewards dash={dash.data} />;
       break;
     case "performance":
       page = <Performance dash={dash.data} />;

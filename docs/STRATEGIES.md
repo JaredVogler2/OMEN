@@ -231,6 +231,11 @@ Two other ideas failed against data and were not built:
 * **Buying 90–99¢ favorites in the last minutes of the 15-minute crypto markets.** Across 2,746 settled markets
   they were priced almost exactly right, so the fee made the strategy slightly negative.
 
+## 💧 Liquidity rewards (not a play: a service)
+
+Kalshi pays rewards to resting orders in thousands of markets. `omen lp` collects them with small cheap-side bids and
+accounts for every fill. The rules, the evidence and the risks are in [LIQUIDITY.md](LIQUIDITY.md).
+
 ## Paper ledger
 
 Every play alerted to `#kalshi-plays` is recorded at its verified size, prices and fees. It is settled from Kalshi's

@@ -9,6 +9,11 @@ It never places a real order unless you explicitly turn execution on ([docs/EXEC
 A private **website** on Vercel's free plan shows every play worth playing live, runs scans on demand and explains
 the fees behind each number ([docs/WEB.md](docs/WEB.md)).
 
+**Liquidity rewards** (`omen lp`) are the one repeatable source of profit the research found. Kalshi pays about
+$180,000 a day to people who keep resting orders in its books. OMEN rests small bids on the cheap side of rewarded
+markets, avoids the series where resting orders get picked off, and counts every reward, fill and settlement. It runs
+in paper mode until you switch it to live ([docs/LIQUIDITY.md](docs/LIQUIDITY.md)).
+
 ## What counts as "high confidence"
 
 OMEN has two tiers, and it never mixes them up.
@@ -115,6 +120,7 @@ shared secret); the site never holds Kalshi keys or places orders. Setup takes a
 | `omen atlas [--days 45]` | Rebuilds the calibration atlas (where Kalshi was wrong after fees). Weekly with `install-pi.sh --with-atlas-timer`. |
 | `omen publish` | Pushes the live feed to the website once (setup check; `omen run` publishes on its own). |
 | `omen web` | Runs the website locally (API + built frontend) for previews. |
+| `omen lp run` / `omen lp status` / `omen lp programs` | Liquidity-reward quoting: the loop (paper by default), its results, and today's programs ranked by reward per dollar. As a service: `install-pi.sh --with-lp`. |
 
 ## Documentation
 
@@ -125,10 +131,12 @@ shared secret); the site never holds Kalshi keys or places orders. Setup takes a
 * [docs/EXECUTION.md](docs/EXECUTION.md): optional demo and live order placement and its guards.
 * [docs/WEB.md](docs/WEB.md): the website: pages, architecture, free-plan budget, setup and security.
 * [docs/PI_HARDWARE.md](docs/PI_HARDWARE.md): one Raspberry Pi for STONKS and OMEN: shopping list and step-by-step plan.
+* [docs/LIQUIDITY.md](docs/LIQUIDITY.md): liquidity rewards: Kalshi's filed scoring rules, the evidence, the risks,
+  and how to go from paper to live.
 
 ## Status and honesty
 
-* Tested: 112 unit and end-to-end tests. They cover fee math against Kalshi's published examples, structural traps
+* Tested: 130 unit and end-to-end tests. They cover fee math against Kalshi's published examples, structural traps
   (opposite-team spreads, holes in partitions, fair-price clauses), a fake-exchange pipeline (alert → GONE edit →
   settlement → fee-change notice) and the website API (auth, signed ingest, streamed scans, budgets). Read-only scans
   against the live Kalshi API ran from the build environment. The latest full scan (2026-10-23) covered 169,024

@@ -196,6 +196,34 @@ def build_feed(ledger: Any, engine: Any, models: list[Any], settings: Any, now: 
             }
         )
     s = settings
+    lp_mode = s.liquidity.mode
+    lp_held = ledger.lp_positions(lp_mode)
+    liquidity = {
+        "enabled": s.liquidity.enabled,
+        "mode": lp_mode,
+        "day": ledger.lp_summary(lp_mode, now - timedelta(days=1)),
+        "week": ledger.lp_summary(lp_mode, now - timedelta(days=7)),
+        "total": ledger.lp_summary(lp_mode),
+        "hourly": [{"hour": h, "usd": round(v, 4)} for h, v in ledger.lp_hourly(lp_mode, now - timedelta(days=7))],
+        "by_series": [
+            {"series": k, "usd": round(v, 4)}
+            for k, v in ledger.lp_reward_by_series(lp_mode, now - timedelta(days=7))[:12]
+        ],
+        "inventory": [
+            {"ticker": t, "side": side, "qty": q, "cost": round(c, 4)}
+            for t, sides in sorted(lp_held.items())
+            for side, (q, c) in sides.items()
+            if q
+        ],
+        "fills": ledger.lp_recent_fills(lp_mode, 50),
+        "settled": ledger.lp_recent_settlements(lp_mode, 50),
+        "settings": {
+            "sides": s.liquidity.sides,
+            "capital_per_market_usd": s.liquidity.capital_per_market_usd,
+            "max_total_capital_usd": s.liquidity.max_total_capital_usd,
+            "max_markets": s.liquidity.max_markets,
+        },
+    }
     return {
         "version": 1,
         "omen_version": __version__,
@@ -209,6 +237,7 @@ def build_feed(ledger: Any, engine: Any, models: list[Any], settings: Any, now: 
             "totals": [dict(r) for r in totals],
         },
         "models": model_status,
+        "liquidity": liquidity,
         "runs": runs,
         "fees": {
             "schedule_version": engine.schedule.version,
