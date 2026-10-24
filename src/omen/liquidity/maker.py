@@ -7,16 +7,19 @@ import logging
 import math
 import uuid
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Protocol
 
 from omen.http import HttpError
 from omen.kalshi.client import KalshiClient
-from omen.kalshi.models import OrderBook
+from omen.kalshi.models import Level, OrderBook
 
 log = logging.getLogger(__name__)
 SIDES = ("yes", "no")
+DEAD_SIDE_MARGIN = 1.1  # dead-side bids rest 10% above what the side needs, so a small fill does not void it
 
 
 def levels(book: OrderBook, side: str) -> list[tuple[float, float]]:
@@ -32,6 +35,7 @@ class Quote:
     side: str
     price: float
     size: int
+    keep_min: float = 0.0  # replace the resting order once fills leave it smaller than this
 
 
 @dataclass(frozen=True)
@@ -110,8 +114,11 @@ def dead_side_quote(
         return None  # already paid (or can't be completed from this side alone)
     if lv_live[0][0] + 0.01 >= 1 - 1e-9:
         return None
-    size = min(math.ceil(target), math.floor((max_loss - held_cost.get(dead, 0.0)) / 0.01 + 1e-9))
-    return Quote(book.ticker, dead, 0.01, size) if size >= 1 else None
+    # the side must reach the target in every snapshot: one contract short and the snapshot pays nobody, so rest a
+    # margin above the shortfall and replace the bid as soon as fills eat into what is needed
+    shortfall = math.ceil(target - sum(size for _, size in lv_dead) - 1e-9)
+    size = min(math.ceil(shortfall * DEAD_SIDE_MARGIN), math.floor((max_loss - held_cost.get(dead, 0.0)) / 0.01 + 1e-9))
+    return Quote(book.ticker, dead, 0.01, size, keep_min=shortfall) if size >= shortfall else None
 
 
 def dead_side_sales(trade: dict, dead: str) -> float:
@@ -204,6 +211,28 @@ class Venue(Protocol):
     def cancel_all(self) -> None: ...
 
 
+def without_orders(book: OrderBook, orders: Iterable[Resting]) -> OrderBook:
+    """The book as everyone else's bids: a live book includes our own resting orders, which must not be mistaken for
+    competition (or for someone else completing a dead side). Paper books never contain them."""
+    mine: dict[tuple[str, Decimal], Decimal] = {}
+    for o in orders:
+        if o.ticker == book.ticker and o.size > 0:
+            key = (o.side, Decimal(str(round(o.price, 4))))
+            mine[key] = mine.get(key, Decimal(0)) + Decimal(str(o.size))
+    if not mine:
+        return book
+
+    def strip(side: str, rows: tuple[Level, ...]) -> tuple[Level, ...]:
+        out = []
+        for lv in rows:
+            left = lv.size - mine.get((side, lv.price), Decimal(0))
+            if left > 0:
+                out.append(Level(lv.price, left))
+        return tuple(out)
+
+    return OrderBook(book.ticker, strip("yes", book.yes_bids), strip("no", book.no_bids))
+
+
 def crosses(book: OrderBook, q: Quote) -> bool:
     """A bid crosses when it and the other side's best bid add up to a dollar or more (prices are whole cents)."""
     other = levels(book, "no" if q.side == "yes" else "yes")
@@ -211,8 +240,9 @@ def crosses(book: OrderBook, q: Quote) -> bool:
 
 
 def _keep(order: Resting | None, q: Quote) -> bool:
-    """Keep a resting order (and its queue place) while it is at the wanted price and at least half its wanted size."""
-    return order is not None and abs(order.price - q.price) < 1e-9 and order.size >= max(1.0, q.size / 2)
+    """Keep a resting order (and its queue place) while it is at the wanted price and at least half its wanted size
+    (and at least ``keep_min``)."""
+    return order is not None and abs(order.price - q.price) < 1e-9 and order.size >= max(1.0, q.size / 2, q.keep_min)
 
 
 def trade_fields(t: dict) -> tuple[datetime, str, float, str, float, str]:

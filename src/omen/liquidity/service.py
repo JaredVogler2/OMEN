@@ -24,6 +24,7 @@ from omen.liquidity.maker import (
     dead_side_sales,
     decided,
     levels,
+    without_orders,
 )
 from omen.liquidity.programs import Program, eligible, fetch_active, series_of
 from omen.liquidity.scoring import snapshot
@@ -123,6 +124,8 @@ class LiquidityService:
         held = self.ledger.lp_positions(self.mode)
         tickers = sorted({p.ticker for p in self.programs} | {p.ticker for p in self.dead_programs} | set(held))
         self.books = self.client.orderbooks(tickers) if tickers else {}
+        if self.mode == "live":  # every decision below is made against everyone else's bids, as in paper
+            self.books = {t: without_orders(b, self.venue.orders.values()) for t, b in self.books.items()}
         # paper fills come from the public tape; dead-side completion also needs it (live) to measure 1c sales
         tape = self._tape(now) if self.mode == "paper" or self.cfg.complete_dead_sides else []
         self._observe_flow(now, tape)
@@ -232,8 +235,14 @@ class LiquidityService:
             sold = sum(dead_side_sales(t, dead) for t in by_ticker.get(p.ticker, []))
             self._sold[p.ticker] = sold
             dead_levels = levels(book, dead)
-            # a sale proves a 1c bid rested during the interval even if it was used up by the end
-            supply = sold > 0 or any(price <= 0.01 + 1e-9 for price, _ in dead_levels)
+            ours = self.venue.orders.get((p.ticker, dead))
+            # a sale proves a 1c bid rested during the interval even if it was used up by the end; live, our own
+            # resting 1c bid is supply too (the paper one is not in the real book, so nobody could sell into it)
+            supply = (
+                sold > 0
+                or any(price <= 0.01 + 1e-9 for price, _ in dead_levels)
+                or (self.mode == "live" and ours is not None and ours.price <= 0.01 + 1e-9)
+            )
             self.flow.observe(p.ticker, now, elapsed.total_seconds() / 60 if supply else 0.0, sold)
 
     def _imputed_dead_fills(self, now: datetime) -> list[Fill]:

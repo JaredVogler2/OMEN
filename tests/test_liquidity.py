@@ -432,10 +432,15 @@ def test_dead_side_completion_bids_1c_only_where_the_side_is_short():
     from omen.liquidity.maker import dead_side_quote
 
     decided = book("M", yes=[(0.98, 1500), (0.97, 700)], no=[])
-    assert dead_side_quote(decided, 1000, 0.5, {}, 50) == Quote("M", "no", 0.01, 1000)
+    # 10% above the 1000 the side needs, replaced once fills leave less than 1000
+    assert dead_side_quote(decided, 1000, 0.5, {}, 50) == Quote("M", "no", 0.01, 1100, keep_min=1000)
+    partly = book("M", yes=[(0.98, 1500)], no=[(0.01, 400)])
+    assert dead_side_quote(partly, 1000, 0.5, {}, 50) == Quote("M", "no", 0.01, 660, keep_min=600)
     crossed = book("M", yes=[(0.99, 1500), (0.98, 700)], no=[])
     assert dead_side_quote(crossed, 1000, 0.5, {}, 50) is None  # 1c + 99c = $1: the bid would trade, not rest
-    assert dead_side_quote(decided, 1000, 0.5, {"no": 45.0}, 50) == Quote("M", "no", 0.01, 500)  # loss cap
+    # the loss cap leaves room for 500 contracts, too few to complete the side: no bid at all
+    assert dead_side_quote(decided, 1000, 0.5, {"no": 45.0}, 50) is None
+    assert dead_side_quote(decided, 1000, 0.5, {"no": 39.5}, 50) == Quote("M", "no", 0.01, 1050, keep_min=1000)
     paid = book("M", yes=[(0.98, 1500)], no=[(0.01, 3000)])
     assert dead_side_quote(paid, 1000, 0.5, {}, 50) is None  # already reaches the target: nothing to complete
     open_market = book("M", yes=[(0.60, 1500)], no=[(0.38, 3000)])
@@ -448,13 +453,16 @@ def test_service_completes_a_dead_side_and_earns_half_the_reward(tmp_path):
     svc, ledger = service(tmp_path, fake)
     st = svc.step()
     o = svc.venue.orders[("KXRT-FILM-90", "no")]
-    assert (o.price, o.size) == (0.01, 1000.0)
+    assert (o.price, o.size) == (0.01, 1100.0)
     assert st["reward_per_hour"] == pytest.approx(100 / 24 * 0.5, rel=1e-3)  # the whole NO side: half the reward
     # someone buys the favorite at 99c: our 1c NO bid fills and we hold 300 NO at 1c
     fake.now = T0 + timedelta(minutes=1)
     fake.trades = [trade("KXRT-FILM-90", T0 + timedelta(seconds=30), 0.99, "yes", 300, "f1")]
-    svc.step()
+    st = svc.step()
     assert ledger.lp_positions("paper")["KXRT-FILM-90"]["no"] == [300.0, 3.0]
+    # 800 left would leave the side short of 1000 and void every snapshot: a fresh full bid replaces it
+    assert svc.venue.orders[("KXRT-FILM-90", "no")].size == 1100.0
+    assert st["reward_per_hour"] == pytest.approx(100 / 24 * 0.5, rel=1e-3)
 
 
 def test_dead_side_reward_accrues_in_markets_excluded_from_normal_quoting(tmp_path):
@@ -572,3 +580,28 @@ def test_paper_charges_expected_fills_to_a_dead_side_bid_that_rests_alone(tmp_pa
     fake.now = T0 + timedelta(minutes=2)
     svc.step()  # nobody else bids 1c, so the tape shows nothing: two minutes at 0.5 a minute are charged instead
     assert ledger.lp_positions("paper")["KXRT-FILM-90"]["no"] == pytest.approx([1.0, 0.01])
+
+
+def test_live_decisions_leave_our_own_orders_out_of_the_book(tmp_path):
+    from omen.liquidity.maker import Resting, without_orders
+
+    b = book("M", yes=[(0.05, 800)], no=[(0.01, 1100), (0.93, 2000)])
+    stripped = without_orders(b, [Resting("M", "no", 0.01, 1100.0), Resting("M", "yes", 0.05, 300.0)])
+    assert stripped.no_bids == book("M", yes=[], no=[(0.93, 2000)]).no_bids
+    assert stripped.yes_bids == book("M", yes=[(0.05, 500)], no=[]).yes_bids
+
+    class LiveLike(PaperVenue):  # paper fills, but the service treats it as live
+        mode = "live"
+
+    fake = FakeKalshi()
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+    svc, _ = service(tmp_path, fake)
+    svc.venue = LiveLike()
+    svc.step()
+    assert svc.venue.orders[("KXRT-FILM-90", "no")].size == 1100
+    # the exchange now shows our own bid in the book: it must not look like someone else completed the side
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": [["0.0100", "1100.00"]]}
+    fake.now = T0 + timedelta(minutes=1)
+    st = svc.step()
+    assert st["dead_quotes"] == 1
+    assert st["reward_per_hour"] == pytest.approx(100 / 24 * 0.5, rel=1e-3)
