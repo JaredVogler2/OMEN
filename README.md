@@ -9,10 +9,22 @@ It never places a real order unless you explicitly turn execution on ([docs/EXEC
 A private **website** on Vercel's free plan shows every play worth playing live, runs scans on demand and explains
 the fees behind each number ([docs/WEB.md](docs/WEB.md)).
 
-**Liquidity rewards** (`omen lp`) are the one repeatable source of profit the research found. Kalshi pays about
-$180,000 a day to people who keep resting orders in its books. OMEN rests small bids on the cheap side of rewarded
-markets, avoids the series where resting orders get picked off, and counts every reward, fill and settlement. It runs
-in paper mode until you switch it to live ([docs/LIQUIDITY.md](docs/LIQUIDITY.md)).
+**Liquidity rewards** (`omen lp`) are the most promising source of profit the research found, but not yet a proven
+one. Kalshi pays about $180,000 a day to people who keep resting orders in its books. OMEN does two things:
+
+* **Cheap-side bids:** it rests small bids on the cheap side of rewarded markets and avoids series where resting
+  orders get picked off.
+* **Dead-side bids:** it completes the empty side of decided markets with 1¢ bids, but only where recent selling into
+  such bids costs less than the reward.
+
+It counts every reward, fill and settlement. Here is what the evidence on settled markets says:
+
+* **Cheap-side quoting** at the best bid loses more on fills than the average reward pays.
+* **The 1¢ dead-side bids** with that filter netted +$3.72 per decided market-day (95% interval +$2.01 to +$6.07) on
+  6,280 decided market-days.
+
+Rewards are formula estimates until a live account shows Kalshi's actual payouts. OMEN runs in paper mode until you
+switch it to live ([docs/LIQUIDITY.md](docs/LIQUIDITY.md)).
 
 ## What counts as "high confidence"
 

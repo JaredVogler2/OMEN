@@ -6,16 +6,20 @@ from __future__ import annotations
 import logging
 import math
 import uuid
+from collections import deque
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Protocol
 
 from omen.http import HttpError
 from omen.kalshi.client import KalshiClient
-from omen.kalshi.models import OrderBook
+from omen.kalshi.models import Level, OrderBook
 
 log = logging.getLogger(__name__)
 SIDES = ("yes", "no")
+DEAD_SIDE_MARGIN = 1.1  # dead-side bids rest 10% above what the side needs, so a small fill does not void it
 
 
 def levels(book: OrderBook, side: str) -> list[tuple[float, float]]:
@@ -31,6 +35,7 @@ class Quote:
     side: str
     price: float
     size: int
+    keep_min: float = 0.0  # replace the resting order once fills leave it smaller than this
 
 
 @dataclass(frozen=True)
@@ -77,6 +82,17 @@ class QuotePolicy:
         return out
 
 
+def decided(book: OrderBook) -> tuple[str, str] | None:
+    """(dead side, live side) once one side is bid at 97c or more and the other at 2c or less."""
+    for dead, live in (("yes", "no"), ("no", "yes")):
+        lv_dead, lv_live = levels(book, dead), levels(book, live)
+        best_dead = lv_dead[0][0] if lv_dead else 0.0
+        best_live = lv_live[0][0] if lv_live else 0.0
+        if best_dead <= 0.02 and best_live >= 0.97:
+            return dead, live
+    return None
+
+
 def dead_side_quote(
     book: OrderBook, target: float, discount: float, held_cost: dict[str, float], max_loss: float
 ) -> Quote | None:
@@ -89,19 +105,88 @@ def dead_side_quote(
     prices are whole cents, so a 1c bid against a 99c bid would cross and a post-only order is rejected."""
     from omen.liquidity.scoring import side_score
 
-    for dead, live in (("yes", "no"), ("no", "yes")):
-        lv_dead, lv_live = levels(book, dead), levels(book, live)
-        best_dead = lv_dead[0][0] if lv_dead else 0.0
-        best_live = lv_live[0][0] if lv_live else 0.0
-        if best_dead > 0.02 or best_live < 0.97:
-            continue
-        if side_score(lv_dead, target, discount).met or not side_score(lv_live, target, discount).met:
-            return None  # already paid (or can't be completed from this side alone)
-        if best_live + 0.01 >= 1 - 1e-9:
-            return None
-        size = min(math.ceil(target), math.floor((max_loss - held_cost.get(dead, 0.0)) / 0.01 + 1e-9))
-        return Quote(book.ticker, dead, 0.01, size) if size >= 1 else None
-    return None
+    sides = decided(book)
+    if sides is None:
+        return None
+    dead, live = sides
+    lv_dead, lv_live = levels(book, dead), levels(book, live)
+    if side_score(lv_dead, target, discount).met or not side_score(lv_live, target, discount).met:
+        return None  # already paid (or can't be completed from this side alone)
+    if lv_live[0][0] + 0.01 >= 1 - 1e-9:
+        return None
+    # the side must reach the target in every snapshot: one contract short and the snapshot pays nobody, so rest a
+    # margin above the shortfall and replace the bid as soon as fills eat into what is needed
+    shortfall = math.ceil(target - sum(size for _, size in lv_dead) - 1e-9)
+    size = min(math.ceil(shortfall * DEAD_SIDE_MARGIN), math.floor((max_loss - held_cost.get(dead, 0.0)) / 0.01 + 1e-9))
+    return Quote(book.ticker, dead, 0.01, size, keep_min=shortfall) if size >= shortfall else None
+
+
+def dead_side_sales(trade: dict, dead: str) -> float:
+    """Contracts a public trade sold into a 1c bid on the dead side (a favorite bought at 99c), else 0."""
+    _, _, yes_price, taker, count, _ = trade_fields(trade)
+    if dead == "no" and taker == "yes" and yes_price >= 0.99 - 1e-9:
+        return count
+    if dead == "yes" and taker == "no" and yes_price <= 0.01 + 1e-9:
+        return count
+    return 0.0
+
+
+@dataclass
+class DeadSideFlow:
+    """Contracts sold into 1c dead-side bids per minute that such a bid rested, over a trailing window.
+
+    The tape only shows those sales while someone bids 1c on the dead side (with no bid there is nobody to sell to),
+    so the rate is per *supply minute*, and a 1c bid of ours would face it every minute it rests. Markets where that
+    flow costs more than the reward lost money in the settled replay; the rest made money."""
+
+    window: timedelta = timedelta(hours=24)
+    min_supply_minutes: float = 30.0
+    _obs: dict[str, deque] = field(default_factory=dict)  # ticker -> (time, supply minutes, contracts sold)
+    _seeded: set[str] = field(default_factory=set)  # markets whose history was loaded
+
+    def observe(self, ticker: str, now: datetime, supply_minutes: float, contracts: float) -> None:
+        if supply_minutes > 0 or contracts > 0:
+            self._obs.setdefault(ticker, deque()).append((now, supply_minutes, contracts))
+
+    def seeded(self, ticker: str) -> bool:
+        return ticker in self._seeded
+
+    def backfill(self, ticker: str, dead: str, candles: list[dict], trades: list[dict]) -> None:
+        """Seed a market's window from 1-minute candles (did a 1c bid rest on the dead side?) and the trades of the
+        same span, so a restart does not wait a day to learn which markets are safe. Minutes already observed live
+        are kept as they are."""
+        ask_or_bid, mark = ("yes_ask", 0.99) if dead == "no" else ("yes_bid", 0.01)
+        sold: dict[int, float] = {}
+        for t in trades:
+            n = dead_side_sales(t, dead)
+            if n:
+                minute = math.ceil(trade_fields(t)[0].timestamp() / 60) * 60
+                sold[minute] = sold.get(minute, 0.0) + n
+        existing = self._obs.get(ticker) or deque()
+        cutoff = existing[0][0] if existing else None
+        seeded = []
+        for c in candles:
+            end = int(c["end_period_ts"])
+            ts = datetime.fromtimestamp(end, UTC)
+            if cutoff is not None and ts >= cutoff:
+                continue
+            close = (c.get(ask_or_bid) or {}).get("close_dollars")
+            n = sold.get(end, 0.0)
+            supply = n > 0 or (close is not None and abs(float(close) - mark) < 1e-9)
+            if supply:
+                seeded.append((ts, 1.0, n))
+        self._obs[ticker] = deque([*seeded, *existing])
+        self._seeded.add(ticker)
+
+    def rate(self, ticker: str, now: datetime, prior: float) -> float:
+        """Contracts per supply minute over the window, or ``prior`` while too little supply was seen."""
+        obs = self._obs.get(ticker)
+        while obs and now - obs[0][0] > self.window:
+            obs.popleft()
+        supply = sum(o[1] for o in obs) if obs else 0.0
+        if supply < self.min_supply_minutes:
+            return prior
+        return sum(o[2] for o in obs) / supply
 
 
 @dataclass
@@ -126,6 +211,28 @@ class Venue(Protocol):
     def cancel_all(self) -> None: ...
 
 
+def without_orders(book: OrderBook, orders: Iterable[Resting]) -> OrderBook:
+    """The book as everyone else's bids: a live book includes our own resting orders, which must not be mistaken for
+    competition (or for someone else completing a dead side). Paper books never contain them."""
+    mine: dict[tuple[str, Decimal], Decimal] = {}
+    for o in orders:
+        if o.ticker == book.ticker and o.size > 0:
+            key = (o.side, Decimal(str(round(o.price, 4))))
+            mine[key] = mine.get(key, Decimal(0)) + Decimal(str(o.size))
+    if not mine:
+        return book
+
+    def strip(side: str, rows: tuple[Level, ...]) -> tuple[Level, ...]:
+        out = []
+        for lv in rows:
+            left = lv.size - mine.get((side, lv.price), Decimal(0))
+            if left > 0:
+                out.append(Level(lv.price, left))
+        return tuple(out)
+
+    return OrderBook(book.ticker, strip("yes", book.yes_bids), strip("no", book.no_bids))
+
+
 def crosses(book: OrderBook, q: Quote) -> bool:
     """A bid crosses when it and the other side's best bid add up to a dollar or more (prices are whole cents)."""
     other = levels(book, "no" if q.side == "yes" else "yes")
@@ -133,8 +240,9 @@ def crosses(book: OrderBook, q: Quote) -> bool:
 
 
 def _keep(order: Resting | None, q: Quote) -> bool:
-    """Keep a resting order (and its queue place) while it is at the wanted price and at least half its wanted size."""
-    return order is not None and abs(order.price - q.price) < 1e-9 and order.size >= max(1.0, q.size / 2)
+    """Keep a resting order (and its queue place) while it is at the wanted price and at least half its wanted size
+    (and at least ``keep_min``)."""
+    return order is not None and abs(order.price - q.price) < 1e-9 and order.size >= max(1.0, q.size / 2, q.keep_min)
 
 
 def trade_fields(t: dict) -> tuple[datetime, str, float, str, float, str]:

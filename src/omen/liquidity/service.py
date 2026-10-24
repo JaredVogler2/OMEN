@@ -14,13 +14,25 @@ from omen.http import HttpError
 from omen.kalshi.client import KalshiClient
 from omen.kalshi.models import Market, OrderBook
 from omen.ledger import Ledger
-from omen.liquidity.maker import Fill, Quote, QuotePolicy, Venue, dead_side_quote, levels
+from omen.liquidity.maker import (
+    DeadSideFlow,
+    Fill,
+    Quote,
+    QuotePolicy,
+    Venue,
+    dead_side_quote,
+    dead_side_sales,
+    decided,
+    levels,
+    without_orders,
+)
 from omen.liquidity.programs import Program, eligible, fetch_active, series_of
 from omen.liquidity.scoring import snapshot
 
 log = logging.getLogger(__name__)
 REFRESH = timedelta(minutes=5)
 MAX_TAPE_PAGES = 30
+MAX_BACKFILLS = 10  # markets whose 1c selling history is fetched per cycle (a few requests each)
 
 
 def policy_from(settings: Settings) -> QuotePolicy:
@@ -74,6 +86,10 @@ class LiquidityService:
         self._last: datetime | None = None
         self._rates: dict[str, float] = {}
         self._tape_since: datetime | None = None
+        self.flow = DeadSideFlow()
+        self._flow_at: datetime | None = None
+        self._flow_minutes = 0.0
+        self._sold: dict[str, float] = {}  # contracts the tape showed sold into 1c dead-side bids this interval
         self._killed = False
         self._last_summary: datetime | None = None
         self.last_error: str | None = None
@@ -108,8 +124,14 @@ class LiquidityService:
         held = self.ledger.lp_positions(self.mode)
         tickers = sorted({p.ticker for p in self.programs} | {p.ticker for p in self.dead_programs} | set(held))
         self.books = self.client.orderbooks(tickers) if tickers else {}
-        tape = self._tape(now) if self.mode == "paper" else []
+        if self.mode == "live":  # every decision below is made against everyone else's bids, as in paper
+            self.books = {t: without_orders(b, self.venue.orders.values()) for t, b in self.books.items()}
+        # paper fills come from the public tape; dead-side completion also needs it (live) to measure 1c sales
+        tape = self._tape(now) if self.mode == "paper" or self.cfg.complete_dead_sides else []
+        self._observe_flow(now, tape)
         fills = self.venue.fills(tape, now)
+        if self.mode == "paper":
+            fills += self._imputed_dead_fills(now)
         new = [f for f in fills if self.ledger.lp_record_fill(self.mode, f)]
         if new:
             self._report_fills(new)
@@ -124,6 +146,7 @@ class LiquidityService:
         stats.update(
             programs=len(self.programs),
             quotes=len(self.venue.orders),
+            dead_quotes=sum(1 for o in self.venue.orders.values() if o.price <= 0.01 + 1e-9),
             resting_usd=round(sum(o.price * o.size for o in self.venue.orders.values()), 2),
             inventory_usd=round(sum(v[1] for sides in held.values() for v in sides.values()), 2),
             reward_per_hour=round(sum(self._rates.values()) * 3600, 4),
@@ -174,7 +197,7 @@ class LiquidityService:
     def _tape(self, now: datetime) -> list[dict]:
         """Public trades since the last cycle, exchange-wide (a few requests instead of one per market)."""
         since = self._tape_since or (now - timedelta(seconds=self.cfg.cycle_seconds))
-        ours = {o.ticker for o in self.venue.orders.values()}
+        ours = {o.ticker for o in self.venue.orders.values()} | {p.ticker for p in self.dead_programs}
         out: list[dict] = []
         cursor = ""
         for _ in range(MAX_TAPE_PAGES):
@@ -193,22 +216,98 @@ class LiquidityService:
         self._tape_since = now
         return out
 
+    def _observe_flow(self, now: datetime, tape: list[dict]) -> None:
+        """Record, for every decided market, how much was sold into 1c dead-side bids and for how long one rested."""
+        cycle = timedelta(seconds=self.cfg.cycle_seconds)
+        elapsed = min(now - self._flow_at, 3 * cycle) if self._flow_at else cycle
+        self._flow_at = now
+        self._flow_minutes = elapsed.total_seconds() / 60
+        self._sold = {}
+        by_ticker: dict[str, list[dict]] = {}
+        for t in tape:
+            by_ticker.setdefault(t.get("ticker", ""), []).append(t)
+        for p in self.dead_programs:
+            book = self.books.get(p.ticker)
+            sides = decided(book) if book is not None else None
+            if sides is None:
+                continue
+            dead = sides[0]
+            sold = sum(dead_side_sales(t, dead) for t in by_ticker.get(p.ticker, []))
+            self._sold[p.ticker] = sold
+            dead_levels = levels(book, dead)
+            ours = self.venue.orders.get((p.ticker, dead))
+            # a sale proves a 1c bid rested during the interval even if it was used up by the end; live, our own
+            # resting 1c bid is supply too (the paper one is not in the real book, so nobody could sell into it)
+            supply = (
+                sold > 0
+                or any(price <= 0.01 + 1e-9 for price, _ in dead_levels)
+                or (self.mode == "live" and ours is not None and ours.price <= 0.01 + 1e-9)
+            )
+            self.flow.observe(p.ticker, now, elapsed.total_seconds() / 60 if supply else 0.0, sold)
+
+    def _imputed_dead_fills(self, now: datetime) -> list[Fill]:
+        """Paper only: a 1c dead-side bid of ours that rests alone faces the market's measured selling flow, but the
+        public tape cannot show sales into a bid that does not exist. Charge the expected fills at that rate instead,
+        as the replay did, so paper results do not look better than live ones would."""
+        out: list[Fill] = []
+        for (ticker, side), o in self.venue.orders.items():
+            book = self.books.get(ticker)
+            if o.price > 0.01 + 1e-9 or o.size <= 0 or book is None:
+                continue
+            if self._sold.get(ticker) or any(price <= 0.01 + 1e-9 for price, _ in levels(book, side)):
+                continue  # a real 1c bid rested too: the tape shows those sales and the queue model handles them
+            qty = round(min(o.size, self.flow.rate(ticker, now, self.cfg.dead_side_flow_prior) * self._flow_minutes), 2)
+            if qty <= 0:
+                continue
+            o.size -= qty
+            out.append(
+                Fill(now, ticker, side, o.price, qty, 0.0, o.order_id, f"imputed-{o.order_id}-{now.timestamp():.0f}")
+            )
+        return out
+
+    def _backfill_flow(self, ticker: str, dead: str, now: datetime) -> None:
+        """Load a market's last day of 1-minute candles and trades into the flow window (once per market)."""
+        start = int((now - self.flow.window).timestamp())
+        try:
+            candles = (
+                self.client.http.get_json(
+                    f"/series/{series_of(ticker)}/markets/{ticker}/candlesticks",
+                    params={"start_ts": start, "end_ts": int(now.timestamp()), "period_interval": 1},
+                ).get("candlesticks")
+                or []
+            )
+            trades: list[dict] = []
+            cursor = ""
+            for _ in range(MAX_TAPE_PAGES):
+                params: dict = {"ticker": ticker, "min_ts": start, "limit": 1000}
+                if cursor:
+                    params["cursor"] = cursor
+                data = self.client.http.get_json("/markets/trades", params=params)
+                trades.extend(data.get("trades") or [])
+                cursor = data.get("cursor") or ""
+                if not cursor:
+                    break
+        except HttpError as exc:
+            self.last_error = f"flow history {ticker}: {exc}"
+            log.warning(self.last_error)
+            return
+        self.flow.backfill(ticker, dead, candles, trades)
+
     def _desired(self, now: datetime, held: dict[str, dict[str, list[float]]]) -> list[Quote]:
         """Quotes for every eligible market, the best reward per dollar first, until the capital budget is used."""
-        stop = timedelta(minutes=self.cfg.stop_before_close_minutes)
         best: dict[tuple[str, str], tuple[float, Quote]] = {}
 
-        def usable(p: Program) -> OrderBook | None:
+        def usable(p: Program, stop_minutes: int) -> OrderBook | None:
             m = self.markets.get(p.ticker)
             book = self.books.get(p.ticker)
             if m is None or book is None or not m.tradable:
                 return None
-            if m.close_time is not None and m.close_time - now < stop:
+            if m.close_time is not None and m.close_time - now < timedelta(minutes=stop_minutes):
                 return None
             return book
 
         for p in self.programs:
-            book = usable(p)
+            book = usable(p, self.cfg.stop_before_close_minutes)
             if book is None:
                 continue
             cost = {side: v[1] for side, v in held.get(p.ticker, {}).items()}
@@ -217,8 +316,9 @@ class LiquidityService:
                 if rate * 86400 / q.size < self.cfg.min_reward_per_contract_day:
                     continue  # the reward would not cover what fills cost on average
                 best[(q.ticker, q.side)] = (rate / max(q.price * q.size, 1e-9), q)
+        backfills = 0
         for p in self.dead_programs:
-            book = usable(p)
+            book = usable(p, self.cfg.dead_side_stop_before_close_minutes)
             if book is None:
                 continue
             cost = {side: v[1] for side, v in held.get(p.ticker, {}).items()}
@@ -226,6 +326,16 @@ class LiquidityService:
             if q is None:
                 continue
             rate = reward_rate(p, book, {q.side: (q.price, q.size)})
+            if not self.flow.seeded(p.ticker):
+                if backfills >= MAX_BACKFILLS:
+                    continue  # its selling history loads in a later cycle; never bid on a market not yet checked
+                backfills += 1
+                self._backfill_flow(p.ticker, q.side, now)
+                if not self.flow.seeded(p.ticker):
+                    continue  # the history request failed
+            flow = self.flow.rate(p.ticker, now, self.cfg.dead_side_flow_prior)
+            if flow * 1440 * 0.01 > self.cfg.dead_side_max_flow_ratio * rate * 86400:
+                continue  # 1c sales here would cost more than the reward: such markets lost money in the replay
             score = rate / max(q.price * q.size, 1e-9)
             if rate > 0 and score > best.get((q.ticker, q.side), (0.0, q))[0]:
                 best[(q.ticker, q.side)] = (score, q)

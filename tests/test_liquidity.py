@@ -244,6 +244,9 @@ class FakeKalshi:
         self.status = "active"
         self.result = ""
         self.trades: list[dict] = []
+        self.history: list[dict] = []  # trades returned for a single-market query (flow backfill)
+        self.candles: list[dict] = []
+        self.close = "2026-11-01T00:00:00Z"
         self.book = {"yes_dollars": [["0.0500", "500.00"]], "no_dollars": [["0.9300", "2000.00"]]}
 
     def handler(self, request: httpx.Request) -> httpx.Response:
@@ -280,7 +283,10 @@ class FakeKalshi:
                 },
             )
         if u.path.endswith("/markets/trades"):
-            return httpx.Response(200, json={"trades": self.trades, "cursor": ""})
+            trades = self.history if "ticker" in q else self.trades
+            return httpx.Response(200, json={"trades": trades, "cursor": ""})
+        if u.path.endswith("/candlesticks"):
+            return httpx.Response(200, json={"candlesticks": self.candles})
         if u.path.endswith("/markets"):
             return httpx.Response(
                 200,
@@ -291,7 +297,7 @@ class FakeKalshi:
                             "event_ticker": "KXRT-FILM",
                             "status": self.status,
                             "result": self.result,
-                            "close_time": "2026-11-01T00:00:00Z",
+                            "close_time": self.close,
                             "market_type": "binary",
                         }
                         for t in q.get("tickers", [""])[0].split(",")
@@ -426,10 +432,15 @@ def test_dead_side_completion_bids_1c_only_where_the_side_is_short():
     from omen.liquidity.maker import dead_side_quote
 
     decided = book("M", yes=[(0.98, 1500), (0.97, 700)], no=[])
-    assert dead_side_quote(decided, 1000, 0.5, {}, 50) == Quote("M", "no", 0.01, 1000)
+    # 10% above the 1000 the side needs, replaced once fills leave less than 1000
+    assert dead_side_quote(decided, 1000, 0.5, {}, 50) == Quote("M", "no", 0.01, 1100, keep_min=1000)
+    partly = book("M", yes=[(0.98, 1500)], no=[(0.01, 400)])
+    assert dead_side_quote(partly, 1000, 0.5, {}, 50) == Quote("M", "no", 0.01, 660, keep_min=600)
     crossed = book("M", yes=[(0.99, 1500), (0.98, 700)], no=[])
     assert dead_side_quote(crossed, 1000, 0.5, {}, 50) is None  # 1c + 99c = $1: the bid would trade, not rest
-    assert dead_side_quote(decided, 1000, 0.5, {"no": 45.0}, 50) == Quote("M", "no", 0.01, 500)  # loss cap
+    # the loss cap leaves room for 500 contracts, too few to complete the side: no bid at all
+    assert dead_side_quote(decided, 1000, 0.5, {"no": 45.0}, 50) is None
+    assert dead_side_quote(decided, 1000, 0.5, {"no": 39.5}, 50) == Quote("M", "no", 0.01, 1050, keep_min=1000)
     paid = book("M", yes=[(0.98, 1500)], no=[(0.01, 3000)])
     assert dead_side_quote(paid, 1000, 0.5, {}, 50) is None  # already reaches the target: nothing to complete
     open_market = book("M", yes=[(0.60, 1500)], no=[(0.38, 3000)])
@@ -442,13 +453,16 @@ def test_service_completes_a_dead_side_and_earns_half_the_reward(tmp_path):
     svc, ledger = service(tmp_path, fake)
     st = svc.step()
     o = svc.venue.orders[("KXRT-FILM-90", "no")]
-    assert (o.price, o.size) == (0.01, 1000.0)
+    assert (o.price, o.size) == (0.01, 1100.0)
     assert st["reward_per_hour"] == pytest.approx(100 / 24 * 0.5, rel=1e-3)  # the whole NO side: half the reward
     # someone buys the favorite at 99c: our 1c NO bid fills and we hold 300 NO at 1c
     fake.now = T0 + timedelta(minutes=1)
     fake.trades = [trade("KXRT-FILM-90", T0 + timedelta(seconds=30), 0.99, "yes", 300, "f1")]
-    svc.step()
+    st = svc.step()
     assert ledger.lp_positions("paper")["KXRT-FILM-90"]["no"] == [300.0, 3.0]
+    # 800 left would leave the side short of 1000 and void every snapshot: a fresh full bid replaces it
+    assert svc.venue.orders[("KXRT-FILM-90", "no")].size == 1100.0
+    assert st["reward_per_hour"] == pytest.approx(100 / 24 * 0.5, rel=1e-3)
 
 
 def test_dead_side_reward_accrues_in_markets_excluded_from_normal_quoting(tmp_path):
@@ -468,3 +482,142 @@ def test_paper_venue_rejects_a_quote_that_would_cross_like_post_only():
     assert venue.orders == {}
     venue.sync([Quote("M", "no", 0.01, 50)], {"M": book("M", yes=[(0.98, 100)], no=[])}, T0)
     assert ("M", "no") in venue.orders
+
+
+def test_dead_side_flow_is_measured_per_minute_a_1c_bid_rested():
+    from omen.liquidity.maker import DeadSideFlow
+
+    f = DeadSideFlow()
+    assert f.rate("M", T0, prior=1.0) == 1.0
+    f.observe("M", T0, 20, 10)
+    assert f.rate("M", T0, prior=1.0) == 1.0  # under 30 minutes of 1c bids seen: still the prior
+    f.observe("M", T0 + timedelta(minutes=20), 20, 30)
+    assert f.rate("M", T0 + timedelta(minutes=20), prior=1.0) == pytest.approx(1.0)  # 40 contracts in 40 minutes
+    f.observe("M", T0 + timedelta(minutes=40), 0, 0)  # no 1c bid and no sales: nothing learned
+    f.observe("M", T0 + timedelta(minutes=60), 20, 0)
+    assert f.rate("M", T0 + timedelta(minutes=60), prior=1.0) == pytest.approx(40 / 60)
+    # a day later the first observation has aged out: 40 minutes left, 30 contracts
+    assert f.rate("M", T0 + timedelta(hours=24, minutes=10), prior=7.0) == pytest.approx(30 / 40)
+
+
+def test_service_stops_completing_a_dead_side_that_sellers_hit_faster_than_the_reward_pays(tmp_path):
+    fake = FakeKalshi()
+    # someone else rests 50 NO at 1c, short of the 1000 target: the side still needs completing
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": [["0.0100", "50.00"]]}
+    svc, _ = service(tmp_path, fake)
+    svc.flow.min_supply_minutes = 2
+    st = svc.step()
+    assert ("KXRT-FILM-90", "no") in svc.venue.orders and st["dead_quotes"] == 1  # the prior costs less than the reward
+    for i in range(1, 3):
+        fake.now = T0 + timedelta(minutes=i)
+        fake.trades = [trade("KXRT-FILM-90", fake.now - timedelta(seconds=30), 0.99, "yes", 100, f"s{i}")]
+        st = svc.step()
+    # 100 contracts a minute sold at 1c cost $1,440 a day, far more than the ~$48 a day the bid earns
+    assert ("KXRT-FILM-90", "no") not in svc.venue.orders and st["dead_quotes"] == 0
+
+
+def candle(ts: datetime, yes_bid: float, yes_ask: float) -> dict:
+    return {
+        "end_period_ts": int(ts.timestamp()),
+        "yes_bid": {"close_dollars": f"{yes_bid:.4f}"},
+        "yes_ask": {"close_dollars": f"{yes_ask:.4f}"},
+    }
+
+
+def test_dead_side_flow_backfills_from_candles_and_trades_without_double_counting():
+    from omen.liquidity.maker import DeadSideFlow
+
+    f = DeadSideFlow()
+    start = T0 - timedelta(hours=2)
+    # NO is dead: a 1c NO bid (YES ask 99c) rested in 40 of 60 minutes; 2 contracts were sold into it in 10 of them
+    candles = [candle(start + timedelta(minutes=i), 0.98, 0.99 if i < 40 else 0.98) for i in range(1, 61)]
+    trades = [trade("M", start + timedelta(minutes=i, seconds=-20), 0.99, "yes", 2, f"h{i}") for i in range(1, 11)]
+    f.observe("M", start + timedelta(minutes=50), 10, 0)  # already seen live: minutes from 50 on are not re-counted
+    f.backfill("M", "no", candles, trades)
+    assert f.seeded("M")
+    assert f.rate("M", T0, prior=9.0) == pytest.approx(20 / (39 + 10))
+
+
+def test_service_backfills_flow_history_before_completing_a_dead_side(tmp_path):
+    fake = FakeKalshi()
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+    start = T0 - timedelta(hours=1)
+    # the last hour: a 1c NO bid rested every minute and someone sold 100 contracts into it each minute
+    fake.candles = [candle(start + timedelta(minutes=i), 0.98, 0.99) for i in range(1, 61)]
+    fake.history = [
+        trade("KXRT-FILM-90", start + timedelta(minutes=i, seconds=-30), 0.99, "yes", 100, f"h{i}")
+        for i in range(1, 61)
+    ]
+    svc, _ = service(tmp_path, fake)
+    st = svc.step()
+    assert svc.flow.seeded("KXRT-FILM-90")
+    assert st["dead_quotes"] == 0  # without history the prior (1 contract a minute) would have allowed the bid
+
+
+def test_dead_sides_rest_closer_to_the_close_than_cheap_side_quotes(tmp_path):
+    fake = FakeKalshi()
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+    fake.close = (T0 + timedelta(hours=8)).isoformat().replace("+00:00", "Z")
+    svc, _ = service(tmp_path, fake)
+    assert svc.cfg.stop_before_close_minutes == 720 and svc.cfg.dead_side_stop_before_close_minutes == 360
+    assert svc.step()["dead_quotes"] == 1  # 8 h before close: inside the 12 h stop, outside the 6 h dead-side stop
+    svc.cfg.dead_side_stop_before_close_minutes = 720
+    fake.now = T0 + timedelta(minutes=1)
+    assert svc.step()["dead_quotes"] == 0
+
+
+def test_paper_charges_expected_fills_to_a_dead_side_bid_that_rests_alone(tmp_path):
+    fake = FakeKalshi()
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+    start = T0 - timedelta(hours=1)
+    # the last hour: a 1c NO bid rested every minute and 30 contracts were sold into it: 0.5 a minute
+    fake.candles = [candle(start + timedelta(minutes=i), 0.98, 0.99) for i in range(1, 61)]
+    fake.history = [
+        trade("KXRT-FILM-90", start + timedelta(minutes=i, seconds=-30), 0.99, "yes", 1, f"h{i}") for i in range(1, 31)
+    ]
+    svc, ledger = service(tmp_path, fake)
+    assert svc.step()["dead_quotes"] == 1
+    fake.now = T0 + timedelta(minutes=2)
+    svc.step()  # nobody else bids 1c, so the tape shows nothing: two minutes at 0.5 a minute are charged instead
+    assert ledger.lp_positions("paper")["KXRT-FILM-90"]["no"] == pytest.approx([1.0, 0.01])
+
+
+def test_live_decisions_leave_our_own_orders_out_of_the_book(tmp_path):
+    from omen.liquidity.maker import Resting, without_orders
+
+    b = book("M", yes=[(0.05, 800)], no=[(0.01, 1100), (0.93, 2000)])
+    stripped = without_orders(b, [Resting("M", "no", 0.01, 1100.0), Resting("M", "yes", 0.05, 300.0)])
+    assert stripped.no_bids == book("M", yes=[], no=[(0.93, 2000)]).no_bids
+    assert stripped.yes_bids == book("M", yes=[(0.05, 500)], no=[]).yes_bids
+
+    class LiveLike(PaperVenue):  # paper fills, but the service treats it as live
+        mode = "live"
+
+    fake = FakeKalshi()
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+    svc, _ = service(tmp_path, fake)
+    svc.venue = LiveLike()
+    svc.step()
+    assert svc.venue.orders[("KXRT-FILM-90", "no")].size == 1100
+    # the exchange now shows our own bid in the book: it must not look like someone else completed the side
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": [["0.0100", "1100.00"]]}
+    fake.now = T0 + timedelta(minutes=1)
+    st = svc.step()
+    assert st["dead_quotes"] == 1
+    assert st["reward_per_hour"] == pytest.approx(100 / 24 * 0.5, rel=1e-3)
+
+
+def test_no_dead_side_bid_before_the_market_s_selling_history_is_loaded(tmp_path):
+    import omen.liquidity.service as service_module
+
+    fake = FakeKalshi()
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+    svc, _ = service(tmp_path, fake)
+    limit = service_module.MAX_BACKFILLS
+    service_module.MAX_BACKFILLS = 0  # no history requests left this cycle
+    try:
+        assert svc.step()["dead_quotes"] == 0
+    finally:
+        service_module.MAX_BACKFILLS = limit
+    fake.now = T0 + timedelta(minutes=1)
+    assert svc.step()["dead_quotes"] == 1  # loaded now: quiet history, so the bid goes in
