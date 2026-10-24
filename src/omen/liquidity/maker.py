@@ -77,6 +77,30 @@ class QuotePolicy:
         return out
 
 
+def dead_side_quote(
+    book: OrderBook, target: float, discount: float, held_cost: dict[str, float], max_loss: float
+) -> Quote | None:
+    """A 1c bid that completes the empty side of a decided market, or None.
+
+    Rewards pay only while BOTH sides reach Target Size. Once one side trades at 97c or more, the other is worth about
+    1c and often has too few bids, so nobody is paid. A 1c bid on that side is worth what it costs, can lose at most
+    1c per contract when it fills (it fills when someone buys the favorite at 99c), and makes the market pay rewards
+    again. Only a side that is short of the target is completed."""
+    from omen.liquidity.scoring import side_score
+
+    for dead, live in (("yes", "no"), ("no", "yes")):
+        lv_dead, lv_live = levels(book, dead), levels(book, live)
+        best_dead = lv_dead[0][0] if lv_dead else 0.0
+        best_live = lv_live[0][0] if lv_live else 0.0
+        if best_dead > 0.02 or best_live < 0.97:
+            continue
+        if side_score(lv_dead, target, discount).met or not side_score(lv_live, target, discount).met:
+            return None  # already paid (or can't be completed from this side alone)
+        size = min(math.ceil(target), math.floor((max_loss - held_cost.get(dead, 0.0)) / 0.01 + 1e-9))
+        return Quote(book.ticker, dead, 0.01, size) if size >= 1 else None
+    return None
+
+
 @dataclass
 class Resting:
     ticker: str

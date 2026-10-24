@@ -181,6 +181,11 @@ class LiquiditySettings:
     # quote only where the expected reward beats the pessimistic fill cost: settled fills cost 0.4c (-1.7, +2.6) per
     # contract-day across 1,203 rewarded markets, so 2c per contract-day leaves a margin even at the low end
     min_reward_per_contract_day: float = 0.02
+    # complete the empty side of decided markets with 1c bids (see docs/LIQUIDITY.md "Dead sides"); the loss is capped
+    # at 1c per contract filled and at dead_side_max_loss_usd per market
+    complete_dead_sides: bool = True
+    dead_side_max_loss_usd: float = 50.0
+    dead_side_exclude_series: str = r"15M$|^KXTEMP\w*H$|RATEH$|^KXCRYPTOLEAD"
     summary_every_hours: int = 6
 
 

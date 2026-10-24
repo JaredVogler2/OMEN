@@ -244,6 +244,7 @@ class FakeKalshi:
         self.status = "active"
         self.result = ""
         self.trades: list[dict] = []
+        self.book = {"yes_dollars": [["0.0500", "500.00"]], "no_dollars": [["0.9300", "2000.00"]]}
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         u = urlsplit(str(request.url))
@@ -273,10 +274,7 @@ class FakeKalshi:
                     "orderbooks": [
                         {
                             "ticker": "KXRT-FILM-90",
-                            "orderbook_fp": {
-                                "yes_dollars": [["0.0500", "500.00"]],
-                                "no_dollars": [["0.9300", "2000.00"]],
-                            },
+                            "orderbook_fp": self.book,
                         }
                     ]
                 },
@@ -422,3 +420,30 @@ def test_default_exclusions_cover_speech_and_insider_markets():
         assert pattern.search(series), series
     for series in ("KXRT", "KXTRUMPAPPROVE", "KXYTVIEWSW", "KXBABELMANDEBWEEKLY"):
         assert not pattern.search(series), series
+
+
+def test_dead_side_completion_bids_1c_only_where_the_side_is_short():
+    from omen.liquidity.maker import dead_side_quote
+
+    decided = book("M", yes=[(0.99, 1500), (0.98, 700)], no=[])
+    assert dead_side_quote(decided, 1000, 0.5, {}, 50) == Quote("M", "no", 0.01, 1000)
+    assert dead_side_quote(decided, 1000, 0.5, {"no": 45.0}, 50) == Quote("M", "no", 0.01, 500)  # loss cap
+    paid = book("M", yes=[(0.99, 1500)], no=[(0.01, 3000)])
+    assert dead_side_quote(paid, 1000, 0.5, {}, 50) is None  # already reaches the target: nothing to complete
+    open_market = book("M", yes=[(0.60, 1500)], no=[(0.38, 3000)])
+    assert dead_side_quote(open_market, 1000, 0.5, {}, 50) is None
+
+
+def test_service_completes_a_dead_side_and_earns_half_the_reward(tmp_path):
+    fake = FakeKalshi()
+    fake.book = {"yes_dollars": [["0.9900", "2000.00"]], "no_dollars": []}
+    svc, ledger = service(tmp_path, fake)
+    st = svc.step()
+    o = svc.venue.orders[("KXRT-FILM-90", "no")]
+    assert (o.price, o.size) == (0.01, 1000.0)
+    assert st["reward_per_hour"] == pytest.approx(100 / 24 * 0.5, rel=1e-3)  # the whole NO side: half the reward
+    # someone buys the favorite at 99c: our 1c NO bid fills and we hold 300 NO at 1c
+    fake.now = T0 + timedelta(minutes=1)
+    fake.trades = [trade("KXRT-FILM-90", T0 + timedelta(seconds=30), 0.99, "yes", 300, "f1")]
+    svc.step()
+    assert ledger.lp_positions("paper")["KXRT-FILM-90"]["no"] == [300.0, 3.0]

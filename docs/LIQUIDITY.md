@@ -145,7 +145,42 @@ at 95% confidence. Outside Trump approval, the chance that the net is positive i
 exclusion was chosen after seeing this data. Trump approval carries most of the reward, and its fill cost is too
 noisy to pin down. Keep it in paper.
 
-### 5. Forward paper test on live data
+### 5. Dead sides: completing books that pay nobody
+
+Rewards pay only while both sides reach Target Size. Once a market is decided (one side bid at 97¢ or more), the
+other side is worth about 1¢ and often has too few bids, so every snapshot is excluded and nobody is paid. In 6
+hours of sampled live books, 31% of daily and weekly program snapshots were short of the target on a side, which
+left about $21,900 a day of rewards unpaid.
+
+`complete_dead_sides` (on by default in paper) rests a 1¢ bid on such a side, sized to complete the target, and
+only when that side is short of it:
+
+* **Value:** the bid costs about what it is worth.
+* **Downside:** it can lose at most 1¢ per contract. It fills when someone buys the favorite at 99¢.
+* **Upside:** if the "dead" outcome happens anyway, it pays 99¢.
+* **Cap:** `dead_side_max_loss_usd` (default $50) limits inventory per market.
+
+The replay assumed the worst case for fills: our 1¢ bid absorbs every trade that bought the favorite at 99¢.
+
+| Settled rewarded markets while decided (12+ h before close) | Value |
+|---|---|
+| Markets / decided market-days | 1,175 / 2,239 |
+| Contracts that would have filled the 1¢ bid | 640 per market-day |
+| Settled cost of those fills | **−$6.39 per market-day (95% interval −$7.69 to −$5.23)** |
+| Dead side won anyway | 2 of 1,175 markets |
+| Program reward while decided | $25.58 per market-day; half of it ($12.79) when our bid alone completes the target |
+
+The fill cost is measured tightly because it depends only on how many people buy favorites at 99¢. The uncertain
+part is the share: half the reward only while nobody else bids on the dead side. In the live sample that was the case
+in 31% of snapshots.
+
+**Compliance caveat, plainly:** these are real, fillable, fair-priced bids that make a market meet the two-sided
+requirement the program pays for. But Kalshi's filing lets it end eligibility for activity it judges "inconsistent
+with the purpose of the Program", and liquidity in a decided market is of little use to traders. Kalshi could decide
+this does not deserve rewards. Read Kalshi's current program terms (kalshi.com/regulatory/notices) and set
+`complete_dead_sides = false` if you would rather not take that risk. It is paper-only until you go live.
+
+### 6. Forward paper test on live data
 
 First day, Saturday 2026-10-24, about 4–5 hours, $1,000 cap, paper only. Rewards are estimated with the filed
 formula. "Settled" is real settlement P&L on the paper positions, and "open" is the remaining positions marked at
