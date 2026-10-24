@@ -145,6 +145,7 @@ export interface Feed {
     totals: { status: string; n: number; cap: number | null; pnl: number | null; exp: number | null }[];
   };
   models: { name: string; state: string; summary: string; passed?: boolean; gates?: unknown }[];
+  liquidity?: Liquidity; // absent in feeds from older Pi versions
   runs: Run[];
   fees: {
     schedule_version: string;
@@ -165,6 +166,31 @@ export interface Feed {
       max_plausible_return_pct: number;
     };
   };
+}
+
+export interface LpSummary {
+  reward_usd: number;
+  reward_markets: number;
+  fills: number;
+  contracts: number;
+  notional: number;
+  fees: number;
+  settled_markets: number;
+  settled_pnl: number;
+}
+
+export interface Liquidity {
+  enabled: boolean;
+  mode: "paper" | "live";
+  day: LpSummary;
+  week: LpSummary;
+  total: LpSummary;
+  hourly: { hour: string; usd: number }[];
+  by_series: { series: string; usd: number }[];
+  inventory: { ticker: string; side: string; qty: number; cost: number }[];
+  fills: { ts: string; ticker: string; side: string; price: number; qty: number; fee: number }[];
+  settled: { ticker: string; result: string; ts: string; cost: number; payout: number }[];
+  settings: { sides: string; capital_per_market_usd: number; max_total_capital_usd: number; max_markets: number };
 }
 
 export interface Budget {

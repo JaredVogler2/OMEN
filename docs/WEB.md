@@ -16,6 +16,7 @@ live state over a signed channel.
 | **Edges** | The calibration atlas: for every category, time-to-close and price band, how often contracts bought at that price actually won and the profit per contract after fees, with 95% intervals and the held-out weeks. Validated edges are listed with their numbers, and the page explains how each live signal's confidence is scored. |
 | **Fees** | The fee curve by price (taker, maker, multiplied terms), a calculator using any series' live terms (with series search), scheduled fee changes for the next 30 days, the formula constants and when they were verified, and every series on non-standard terms (maker fees, multipliers, fee-free). |
 | **Crypto model** | Per asset: live spot from three exchanges, volatility used, and for each daily ladder the model's worst-case probability band against the market's bid–ask at every strike, with any positive edges. The model stays in shadow until its calibration gates pass. |
+| **Rewards** | Liquidity-reward quoting (`omen lp`): paper or live mode, rewards over 24 hours, 7 days and all time, cumulative rewards, rewards by series, open inventory, recent fills, settled P&L, and how Kalshi scores resting orders. |
 | **Performance** | The Pi's paper ledger: settled P&L over time, win rate, open positions and expected profit, model validation status. |
 | **System** | Setup checklist, live-feed health (last push, host, version, cadence, Discord outbox), thresholds, this site's budget and recent scanner runs. |
 

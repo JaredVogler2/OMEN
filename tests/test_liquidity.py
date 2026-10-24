@@ -371,3 +371,24 @@ def test_liquidity_settings_validation(tmp_path):
     cfg.write_text('[liquidity]\nsides = "everything"\n')
     with pytest.raises(ConfigError):
         load_settings(cfg, env={})
+
+
+def test_published_feed_carries_the_liquidity_block():
+    from datetime import date
+    from types import SimpleNamespace
+
+    from omen.snapshot import build_feed
+
+    ledger = Ledger(":memory:")
+    ledger.lp_record_fill("paper", Fill(T0, "KXRT-FILM-90", "yes", 0.05, 500, 0.0, "o", "t1"))
+    ledger.lp_add_reward("paper", T0, "KXRT-FILM-90", 1.25, 60)
+    engine = SimpleNamespace(
+        fees=SimpleNamespace(upcoming_changes=lambda now, horizon: [], series={}),
+        schedule=SimpleNamespace(version="test", verified_on=date(2026, 10, 1)),
+        markets={},
+    )
+    feed = build_feed(ledger, engine, [], Settings(), T0 + timedelta(minutes=5))
+    lp = feed["liquidity"]
+    assert lp["mode"] == "paper" and lp["day"]["reward_usd"] == pytest.approx(1.25)
+    assert lp["inventory"] == [{"ticker": "KXRT-FILM-90", "side": "yes", "qty": 500.0, "cost": 25.0}]
+    assert lp["by_series"] == [{"series": "KXRT", "usd": 1.25}] and len(lp["fills"]) == 1

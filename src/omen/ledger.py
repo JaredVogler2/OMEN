@@ -540,3 +540,25 @@ class Ledger:
             series = r["ticker"].split("-", 1)[0]
             totals[series] = totals.get(series, 0.0) + r["usd"]
         return sorted(totals.items(), key=lambda kv: -kv[1])
+
+    def lp_hourly(self, mode: str, since: datetime) -> list[tuple[str, float]]:
+        hour_cut = since.astimezone(UTC).strftime("%Y-%m-%dT%H:00")
+        rows = self.db.execute(
+            "SELECT hour, SUM(usd) usd FROM lp_rewards WHERE mode=? AND hour >= ? GROUP BY hour ORDER BY hour",
+            (mode, hour_cut),
+        )
+        return [(r["hour"], float(r["usd"])) for r in rows]
+
+    def lp_recent_fills(self, mode: str, limit: int = 50) -> list[dict]:
+        rows = self.db.execute(
+            "SELECT ts, ticker, side, price, qty, fee FROM lp_fills WHERE mode=? ORDER BY ts DESC LIMIT ?",
+            (mode, limit),
+        )
+        return [dict(r) for r in rows]
+
+    def lp_recent_settlements(self, mode: str, limit: int = 50) -> list[dict]:
+        rows = self.db.execute(
+            "SELECT ticker, result, ts, cost, payout FROM lp_settlements WHERE mode=? ORDER BY ts DESC LIMIT ?",
+            (mode, limit),
+        )
+        return [dict(r) for r in rows]
