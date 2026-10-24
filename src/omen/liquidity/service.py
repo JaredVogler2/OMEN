@@ -193,6 +193,8 @@ class LiquidityService:
             cost = {side: v[1] for side, v in held.get(p.ticker, {}).items()}
             for q in self.policy.quotes(book, cost):
                 rate = reward_rate(p, book, {q.side: (q.price, q.size)})
+                if rate * 86400 / q.size < self.cfg.min_reward_per_contract_day:
+                    continue  # the reward would not cover what fills cost on average
                 candidates.append((rate / max(q.price * q.size, 1e-9), q))
         candidates.sort(key=lambda c: -c[0])
         budget = self.cfg.max_total_capital_usd - sum(v[1] for sides in held.values() for v in sides.values())

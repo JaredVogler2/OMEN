@@ -402,3 +402,23 @@ def test_capital_is_capped_per_series(tmp_path):
     assert svc.step()["quotes"] == 0
     svc.cfg.max_series_share = 0.3
     assert svc.step()["quotes"] == 1
+
+
+def test_quotes_need_a_reward_that_covers_typical_fill_costs(tmp_path):
+    fake = FakeKalshi()
+    svc, _ = service(tmp_path, fake)
+    # this program pays $100/day; our 500 contracts earn a quarter of it: 5c per contract-day
+    svc.cfg.min_reward_per_contract_day = 0.06
+    assert svc.step()["quotes"] == 0
+    svc.cfg.min_reward_per_contract_day = 0.04
+    assert svc.step()["quotes"] == 1
+
+
+def test_default_exclusions_cover_speech_and_insider_markets():
+    import re
+
+    pattern = re.compile(Settings().liquidity.exclude_series)
+    for series in ("KXTRUMPMENTION", "KXTRUMPSAY", "KXTRUTHSOCIAL", "KXBIGBROTHERELIMINATION", "KXVMA", "KXEURUSD15M"):
+        assert pattern.search(series), series
+    for series in ("KXRT", "KXTRUMPAPPROVE", "KXYTVIEWSW", "KXBABELMANDEBWEEKLY"):
+        assert not pattern.search(series), series

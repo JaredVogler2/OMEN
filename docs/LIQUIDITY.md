@@ -115,7 +115,37 @@ later: impatient sellers dumping long shots. The rewards come on top. The percen
 ties up very little money. In dollars, the per-market cap ($25) and per-series cap (30%) limit what any one market
 can earn or lose.
 
-### 4. Forward paper test on live data
+### 4. Realized settlement on a broad sample (the sobering part)
+
+The 1-hour mark-outs above are favorable, but **settlement** is what pays. The policy was replayed on a broad random
+sample: 1,429 settled rewarded markets across 99 slow series, plus all 353 Trump-approval markets. Results are realized
+fill P&L per contract per day of resting:
+
+| Sample | Markets | Fills | Settled fill P&L (95%) | Live reward | Net |
+|---|---|---|---|---|---|
+| All slow series | 1,429 | 2,304 | **−2.5¢ (−4.7, −0.05)** | 3.6¢ mean, 0.55¢ median | marginal |
+| …except speech / insider markets and Trump approval | 1,203 | 1,316 | +0.4¢ (−1.7, +2.6) | 1.1¢ | +1.5¢ |
+| Trump approval, at the best bid | 353 | 731 | −12.4¢ (−35.4, +10.9) | 22.8¢ | +10.4¢ |
+| Trump approval, 2 ticks behind | 321 | 207 | −2.7¢ (−13.7, +9.7) | 8.1¢ | +5.5¢ |
+
+Most of the loss comes from markets that resolve on what someone says or on insider-decided outcomes:
+
+* Trump mentions: −23¢
+* "Trump says": −39¢
+* Truth Social: −47¢
+* VMAs: −31¢
+* Netflix top movie: −31¢
+* Big Brother eliminations: −73¢
+
+Someone usually knows the answer first. These are now excluded by default, and quotes need a formula reward of at
+least `min_reward_per_contract_day` (2¢), above the pessimistic end of the remaining fill cost.
+
+**Honest status:** after these rules, the expected net is positive but small, and no configuration is yet positive
+at 95% confidence. Outside Trump approval, the chance that the net is positive is about 92%, and the speech/insider
+exclusion was chosen after seeing this data. Trump approval carries most of the reward, and its fill cost is too
+noisy to pin down. Keep it in paper.
+
+### 5. Forward paper test on live data
 
 First day, Saturday 2026-10-24, about 4–5 hours, $1,000 cap, paper only. Rewards are estimated with the filed
 formula. "Settled" is real settlement P&L on the paper positions, and "open" is the remaining positions marked at
