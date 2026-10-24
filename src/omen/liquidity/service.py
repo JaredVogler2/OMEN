@@ -326,9 +326,13 @@ class LiquidityService:
             if q is None:
                 continue
             rate = reward_rate(p, book, {q.side: (q.price, q.size)})
-            if not self.flow.seeded(p.ticker) and backfills < MAX_BACKFILLS:
+            if not self.flow.seeded(p.ticker):
+                if backfills >= MAX_BACKFILLS:
+                    continue  # its selling history loads in a later cycle; never bid on a market not yet checked
                 backfills += 1
                 self._backfill_flow(p.ticker, q.side, now)
+                if not self.flow.seeded(p.ticker):
+                    continue  # the history request failed
             flow = self.flow.rate(p.ticker, now, self.cfg.dead_side_flow_prior)
             if flow * 1440 * 0.01 > self.cfg.dead_side_max_flow_ratio * rate * 86400:
                 continue  # 1c sales here would cost more than the reward: such markets lost money in the replay

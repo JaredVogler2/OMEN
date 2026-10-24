@@ -605,3 +605,19 @@ def test_live_decisions_leave_our_own_orders_out_of_the_book(tmp_path):
     st = svc.step()
     assert st["dead_quotes"] == 1
     assert st["reward_per_hour"] == pytest.approx(100 / 24 * 0.5, rel=1e-3)
+
+
+def test_no_dead_side_bid_before_the_market_s_selling_history_is_loaded(tmp_path):
+    import omen.liquidity.service as service_module
+
+    fake = FakeKalshi()
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+    svc, _ = service(tmp_path, fake)
+    limit = service_module.MAX_BACKFILLS
+    service_module.MAX_BACKFILLS = 0  # no history requests left this cycle
+    try:
+        assert svc.step()["dead_quotes"] == 0
+    finally:
+        service_module.MAX_BACKFILLS = limit
+    fake.now = T0 + timedelta(minutes=1)
+    assert svc.step()["dead_quotes"] == 1  # loaded now: quiet history, so the bid goes in
