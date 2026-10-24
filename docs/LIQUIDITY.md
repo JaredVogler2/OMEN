@@ -39,7 +39,8 @@ each rewarded market.
   `/portfolio/fills`.
 * **Quote.** It bids the best price on the cheap side. Size is capped by `capital_per_market_usd`, and inventory
   already held counts against that cap. Quotes are ranked by expected reward per dollar until
-  `max_total_capital_usd` is used. No bid is left resting within `stop_before_close_minutes` of a market's close.
+  `max_total_capital_usd` is used. No bid is left resting within `stop_before_close_minutes` (12 hours by default)
+  of a market's close, because fills that late lose (Evidence §2).
 * **Count rewards.** Each interval earns the average of its start and end reward rates under the filed formula. The
   end rate is computed in the new book, with our bid where it actually rested, so a fill or a better bid that
   overtook us cuts it.
@@ -71,7 +72,23 @@ fill. Each fill was then marked against the mid one hour later. Results are per 
 Slow series lose little to fills. Fast series (15-minute markets, live sports, gas, and hourly temperature and rates)
 are picked off, so they are excluded by default.
 
-### 2. Forward paper test on live data
+### 2. When fills hurt: the last 12 hours before close
+
+Cheap-side fills at the best bid in the same settled markets, split by hours until the market closed. The older and
+newer halves were checked separately, so the cutoff was not fitted to one period:
+
+| Markets | Filled | Fills | 1-hour mark-out (95%) | Held to settlement |
+|---|---|---|---|---|
+| Older half | 12+ h before close | 279 | **+2.45¢ (+1.03, +4.63)** | +8.0¢ |
+| Older half | last 12 h | 108 | −0.16¢ (−3.05, +3.02) | −7.4¢ |
+| Newer half | 12+ h before close | 307 | **+2.05¢ (+0.65, +3.70)** | +0.1¢ |
+| Newer half | last 12 h | 102 | −1.06¢ (−4.37, +2.04) | −7.0¢ |
+
+Near the close the outcome becomes known, the losing side collapses toward 0, and resting bids on it fill on the way
+down. The first forward paper run met exactly this on Trump-approval markets that settle on a 1 PM reading. So
+`stop_before_close_minutes` defaults to 720: no resting bids in a market's last 12 hours.
+
+### 3. Forward paper test on live data
 
 <!-- FORWARD_RESULTS -->
 

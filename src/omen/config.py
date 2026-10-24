@@ -171,7 +171,7 @@ class LiquiditySettings:
     max_contracts_per_order: int = 500
     min_reward_per_day_usd: float = 5.0
     min_program_hours: float = 12.0  # skip 15-minute and hourly programs (fast markets pick resting orders off)
-    stop_before_close_minutes: int = 120  # no resting orders in the last hours before a market closes
+    stop_before_close_minutes: int = 720  # fills in the last 12 hours before close lost ~7c/contract in history
     exclude_series: str = r"15M$|^KXTEMP\w*H$|RATEH$|^KXAAAGAS|^KXDIESEL|MATCH$|^KXCRYPTOLEAD|GAME$|SPREAD|TOTAL"
     summary_every_hours: int = 6
 
