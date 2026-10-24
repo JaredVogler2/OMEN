@@ -87,6 +87,8 @@ class LiquidityService:
         self._tape_since: datetime | None = None
         self.flow = DeadSideFlow()
         self._flow_at: datetime | None = None
+        self._flow_minutes = 0.0
+        self._sold: dict[str, float] = {}  # contracts the tape showed sold into 1c dead-side bids this interval
         self._killed = False
         self._last_summary: datetime | None = None
         self.last_error: str | None = None
@@ -125,6 +127,8 @@ class LiquidityService:
         tape = self._tape(now) if self.mode == "paper" or self.cfg.complete_dead_sides else []
         self._observe_flow(now, tape)
         fills = self.venue.fills(tape, now)
+        if self.mode == "paper":
+            fills += self._imputed_dead_fills(now)
         new = [f for f in fills if self.ledger.lp_record_fill(self.mode, f)]
         if new:
             self._report_fills(new)
@@ -214,6 +218,8 @@ class LiquidityService:
         cycle = timedelta(seconds=self.cfg.cycle_seconds)
         elapsed = min(now - self._flow_at, 3 * cycle) if self._flow_at else cycle
         self._flow_at = now
+        self._flow_minutes = elapsed.total_seconds() / 60
+        self._sold = {}
         by_ticker: dict[str, list[dict]] = {}
         for t in tape:
             by_ticker.setdefault(t.get("ticker", ""), []).append(t)
@@ -224,10 +230,31 @@ class LiquidityService:
                 continue
             dead = sides[0]
             sold = sum(dead_side_sales(t, dead) for t in by_ticker.get(p.ticker, []))
+            self._sold[p.ticker] = sold
             dead_levels = levels(book, dead)
             # a sale proves a 1c bid rested during the interval even if it was used up by the end
             supply = sold > 0 or any(price <= 0.01 + 1e-9 for price, _ in dead_levels)
             self.flow.observe(p.ticker, now, elapsed.total_seconds() / 60 if supply else 0.0, sold)
+
+    def _imputed_dead_fills(self, now: datetime) -> list[Fill]:
+        """Paper only: a 1c dead-side bid of ours that rests alone faces the market's measured selling flow, but the
+        public tape cannot show sales into a bid that does not exist. Charge the expected fills at that rate instead,
+        as the replay did, so paper results do not look better than live ones would."""
+        out: list[Fill] = []
+        for (ticker, side), o in self.venue.orders.items():
+            book = self.books.get(ticker)
+            if o.price > 0.01 + 1e-9 or o.size <= 0 or book is None:
+                continue
+            if self._sold.get(ticker) or any(price <= 0.01 + 1e-9 for price, _ in levels(book, side)):
+                continue  # a real 1c bid rested too: the tape shows those sales and the queue model handles them
+            qty = round(min(o.size, self.flow.rate(ticker, now, self.cfg.dead_side_flow_prior) * self._flow_minutes), 2)
+            if qty <= 0:
+                continue
+            o.size -= qty
+            out.append(
+                Fill(now, ticker, side, o.price, qty, 0.0, o.order_id, f"imputed-{o.order_id}-{now.timestamp():.0f}")
+            )
+        return out
 
     def _backfill_flow(self, ticker: str, dead: str, now: datetime) -> None:
         """Load a market's last day of 1-minute candles and trades into the flow window (once per market)."""

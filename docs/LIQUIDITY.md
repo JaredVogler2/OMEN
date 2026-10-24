@@ -230,8 +230,10 @@ the replay gave these totals:
 * **Why the sign should hold:** the bot bids only when completing the side pays, so reward and fill cost shrink
   together when that state is rarer than the replay assumes. The third condition only a live account can confirm.
 
-**Paper understates dead-side fills.** Paper fills of a dead-side bid come from the real tape, which shows sales only
-while someone else bids 1¢. The flow filter uses only real 1¢ bids, as the replay does.
+**Paper charges the expected dead-side fills.** The public tape cannot show sales into a bid that does not exist.
+So while our paper 1¢ bid is the only one on its side, the paper venue would never fill it. Instead, paper mode
+books the expected fills each minute at the market's measured selling rate, as the replay does. Where someone else
+also bids 1¢, the real trades and the queue model decide.
 
 **Compliance caveat, plainly:**
 

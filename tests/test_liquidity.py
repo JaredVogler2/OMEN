@@ -556,3 +556,19 @@ def test_dead_sides_rest_closer_to_the_close_than_cheap_side_quotes(tmp_path):
     svc.cfg.dead_side_stop_before_close_minutes = 720
     fake.now = T0 + timedelta(minutes=1)
     assert svc.step()["dead_quotes"] == 0
+
+
+def test_paper_charges_expected_fills_to_a_dead_side_bid_that_rests_alone(tmp_path):
+    fake = FakeKalshi()
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+    start = T0 - timedelta(hours=1)
+    # the last hour: a 1c NO bid rested every minute and 30 contracts were sold into it: 0.5 a minute
+    fake.candles = [candle(start + timedelta(minutes=i), 0.98, 0.99) for i in range(1, 61)]
+    fake.history = [
+        trade("KXRT-FILM-90", start + timedelta(minutes=i, seconds=-30), 0.99, "yes", 1, f"h{i}") for i in range(1, 31)
+    ]
+    svc, ledger = service(tmp_path, fake)
+    assert svc.step()["dead_quotes"] == 1
+    fake.now = T0 + timedelta(minutes=2)
+    svc.step()  # nobody else bids 1c, so the tape shows nothing: two minutes at 0.5 a minute are charged instead
+    assert ledger.lp_positions("paper")["KXRT-FILM-90"]["no"] == pytest.approx([1.0, 0.01])
