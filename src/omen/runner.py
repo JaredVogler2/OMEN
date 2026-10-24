@@ -272,6 +272,7 @@ class Runner:
             return
         try:
             self.publisher.maybe_publish(self.ledger, self.engine, self.models, self.s, self.clock())
+            self.publisher.maybe_publish_atlas(self.s.state_dir / "atlas.json")
         except Exception:
             log.exception("website publish failed")
 

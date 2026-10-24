@@ -325,3 +325,34 @@ def test_fee_pages_do_not_wait_for_a_running_scan(site):
         t.start()
         t.join(timeout=10)
     assert done == [200]
+
+
+def test_atlas_round_trip_from_the_pi_and_only_when_it_changes(site, tmp_path):
+    cookie = login()
+    sent = []
+
+    def forward(request: httpx.Request) -> httpx.Response:
+        sent.append(request.url.path)
+        status, _, body = call(webapp.app, "POST", request.url.path, request.content, dict(request.headers))
+        return httpx.Response(status, content=body)
+
+    path = tmp_path / "atlas.json"
+    doc = {
+        "version": 1,
+        "generated_at": "2026-10-24T00:00:00+00:00",
+        "markets": 9000,
+        "cells": [],
+        "overall": [],
+        "edges": [{"category": "Weather", "horizon": "24h", "band": [0.05, 0.1]}],
+    }
+    path.write_text(json.dumps(doc))
+    pub = Publisher("https://omen.example", SECRET, transport=httpx.MockTransport(forward))
+    assert pub.maybe_publish_atlas(path)
+    assert not pub.maybe_publish_atlas(path)  # unchanged: not re-sent
+    assert sent == ["/api/ingest/atlas"]
+    got = j(call(webapp.app, "GET", "/api/atlas", cookie=cookie))
+    assert got["source"] == "pi" and got["markets"] == 9000 and len(got["edges"]) == 1
+    forged = json.dumps(doc).encode()
+    assert (
+        call(webapp.app, "POST", "/api/ingest/atlas", forged, signed(forged, secret="wrong-secret-0000000"))[0] == 401
+    )

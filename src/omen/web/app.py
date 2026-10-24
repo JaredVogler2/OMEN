@@ -109,6 +109,14 @@ def ingest(req: Request) -> Response:
         raise HTTPError(503, f"store unavailable: {exc}") from None
 
 
+@app.route("POST", "/api/ingest/atlas")
+def ingest_atlas(req: Request) -> Response:
+    try:
+        return json_response(service().ingest_atlas(req.body, req.headers))
+    except StoreError as exc:
+        raise HTTPError(503, f"store unavailable: {exc}") from None
+
+
 # ------------------------------------------------------------------------------------------------ signed-in
 def _store_errors(fn):
     def wrapped(req: Request):
@@ -164,3 +172,8 @@ def series(req: Request) -> Response:
 @app.route("GET", "/api/crypto")
 def crypto(req: Request) -> Response:
     return json_response(_guard(req).crypto_view(req.arg("asset", "BTC") or "BTC"))
+
+
+@app.route("GET", "/api/atlas")
+def atlas(req: Request) -> Response:
+    return json_response(_guard(req).atlas())

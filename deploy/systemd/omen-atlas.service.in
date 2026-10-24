@@ -1,0 +1,16 @@
+# Weekly rebuild of the calibration atlas (where Kalshi's prices were wrong after fees). Rendered by
+# scripts/install-pi.sh --with-atlas-timer. Public data only; ~30-60 min at a polite request rate.
+[Unit]
+Description=OMEN weekly calibration atlas
+
+[Service]
+Type=oneshot
+User=@USER@
+WorkingDirectory=@APP_DIR@
+EnvironmentFile=@ENV_FILE@
+Environment=OMEN_STATE_DIR=@STATE_DIR@ OMEN_PROJECT_ROOT=@APP_DIR@
+ExecStart=@UV@ run --frozen --no-sync omen atlas --out "@STATE_DIR@/atlas.json.new"
+ExecStartPost=/bin/mv -f "@STATE_DIR@/atlas.json.new" "@STATE_DIR@/atlas.json"
+Nice=15
+IOSchedulingClass=idle
+MemoryMax=700M

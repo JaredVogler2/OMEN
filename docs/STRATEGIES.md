@@ -160,6 +160,13 @@ The live build of 2026-10-23 tested an earlier version that used the *highest* v
 flagged cheap tails on both sides at once. That is the classic sign of an overstated volatility, and the reason for
 the grid above. A regression test (`test_both_tails_can_never_both_look_cheap`) keeps it fixed.
 
+**Replayed over two years** (`probability_band()` on hourly BTC/ETH/SOL prices, Oct 2024 – Oct 2026, 138,384
+evaluations at 6 h and 24 h): the worst case is deliberately conservative. Favorites it put at 80–85% won 93.9% of
+the time, at 85–90% won 95.1%, and at 90–95% won 96.7%. The central estimate is honest to about 1.5 points (slightly
+overconfident at the extremes, because real tails are a little fatter). Every crypto signal now quotes the measured
+win rate of its confidence level. Kalshi's crypto prices were also fair in the atlas, so honest probabilities do not
+by themselves create many bets.
+
 ### Validation gates and promotion
 
 `omen report` and the daily digest show, from resolved predictions:
@@ -172,6 +179,57 @@ the grid above. A regression test (`test_both_tails_can_never_both_look_cheap`) 
 The default gates are ≥ 150 resolved signals over ≥ 30 events, a 95% lower ROI bound above 0, and calibration
 error ≤ 0.05. `omen promote crypto_threshold` refuses until all of them pass. `--force --note "why"` overrides and
 records the note.
+
+## 📈 Calibration edges (the atlas; shadow until validated)
+
+Instead of assuming where the crowd is wrong, OMEN measures it. `omen atlas` (weekly on the Pi with
+`scripts/install-pi.sh --with-atlas-timer`) builds the atlas from Kalshi's public data:
+
+1. **Sample.** Settled markets from 15 whole days spread over the last 45, at most 6 per series and 2 per event,
+   so no ladder or game dominates. Combo markets are excluded.
+2. **Price.** From each market's hourly bid/ask history, take what a buyer would really have paid 1, 6, 24 and
+   72 hours before the close: YES at the ask, NO at 1 − bid, only on a real two-sided market (spread ≤ 10¢).
+3. **Score.** Group by category × time-to-close × price band and compute the profit per contract after the taker
+   fee.
+4. **Interval.** 95% intervals come from a bootstrap that resamples whole **series**, because markets of one series
+   rise and fall together.
+5. **Edge test.** Edges are searched for on the older two thirds of the window. A cell becomes an **edge** only if
+   its whole interval is above zero over ≥ 12 series, *and* the newest third (never used in the search) is
+   profitable too.
+
+For a live market in an edge, `calibration_edge` puts a number on confidence:
+
+* the measured mispricing (win rate − price) is shrunk toward zero with a normal prior (`[edge].prior_sd`, 3¢);
+* that gives an estimated true win probability, a 90% lower bound and **P(edge after fees > 0)**. A signal needs
+  ≥ 90% and ≥ 1¢ expected profit per contract;
+* the alert shows the **payout multiple** (how asymmetric the bet is) and a **¼-Kelly stake** on
+  `[edge].bankroll_usd`, capped by `max_capital_usd` and by what the order book supports at a profitable price.
+
+Every evaluation is logged and scored at settlement with the same gates as the crypto model. Signals stay in
+`#kalshi-research` until `omen promote calibration_edge`. An atlas older than `max_atlas_age_days` (21) is ignored,
+so stale edges switch themselves off. The website's **Edges** page shows the whole atlas, including the cells
+where the crowd is right.
+
+**First atlas (2026-10-24): no validated edge.** It covered 9,119 settled markets in 2,025 series (26,116 prices).
+In every category, time-to-close and price band, buying at Kalshi's prices either lost money after the taker fee
+and spread or gained within noise. What it showed:
+
+* **Cheap longshots are overpriced.** At 1–5¢ six or more hours out, they won 0–1.1% of the time against a 3¢ price.
+  The other side (NO at 95–99¢) only broke even once the spread and fee were paid.
+* **Coin flips cost takers about 3–4¢ per contract** (40–60¢, every horizon): roughly the spread plus the fee. That
+  is what market makers earn.
+* **Validation earned its keep.** On the first third of the sample, 60–80¢ favorites a day out looked like
+  +4.7¢ per contract. With the full sample the estimate was −1.2¢ (interval −4.2¢ to +1.4¢), and −0.4¢ on the
+  held-out weeks.
+
+The snapshot is `config/atlas.json`, and the Edges page shows every cell.
+
+Two other ideas failed against data and were not built:
+
+* **Support/resistance on SOL.** Over two years of hourly prices, the next-day move from near support or
+  resistance was a coin flip. Ranges "held" no more often than random bands of the same width.
+* **Buying 90–99¢ favorites in the last minutes of the 15-minute crypto markets.** Across 2,746 settled markets
+  they were priced almost exactly right, so the fee made the strategy slightly negative.
 
 ## Paper ledger
 

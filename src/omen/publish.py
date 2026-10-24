@@ -14,6 +14,7 @@ import logging
 import time
 from collections.abc import Callable
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -65,6 +66,8 @@ class Publisher:
         clock: Callable[[], float] = time.time,
     ):
         self.endpoint = url.rstrip("/") + "/api/ingest"
+        self.atlas_endpoint = url.rstrip("/") + "/api/ingest/atlas"
+        self.atlas_signature: str | None = None
         self.secret = secret
         self.interval = interval_seconds
         self.bypass = bypass
@@ -106,8 +109,29 @@ class Publisher:
             return False
         return self.send(feed, sig)
 
-    def send(self, feed: dict[str, Any], signature: str | None = None) -> bool:
-        body = fit(feed)
+    def maybe_publish_atlas(self, path: Path) -> bool:
+        """Send the calibration atlas when the weekly rebuild produced a new one (it is not part of the feed)."""
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            return False
+        digest = hashlib.sha256(raw).hexdigest()
+        if digest == self.atlas_signature or self.clock() < self.retry_after:
+            return False
+        try:
+            body = json.dumps(json.loads(raw), separators=(",", ":")).encode()
+        except ValueError:
+            return False
+        if len(body) > MAX_BYTES:
+            log.warning("atlas too large to publish (%d bytes)", len(body))
+            self.atlas_signature = digest
+            return False
+        if self._post(self.atlas_endpoint, body) is None:
+            return False
+        self.atlas_signature = digest
+        return True
+
+    def _post(self, url: str, body: bytes) -> httpx.Response | None:
         ts = int(self.clock())
         headers = {
             "content-type": "application/json",
@@ -117,12 +141,20 @@ class Publisher:
         if self.bypass:
             headers["x-vercel-protection-bypass"] = self.bypass
         try:
-            resp = self.client.post(self.endpoint, content=body, headers=headers)
+            resp = self.client.post(url, content=body, headers=headers)
         except httpx.HTTPError as exc:
-            return self._failed(f"network error: {exc}")
+            self._failed(f"network error: {exc}")
+            return None
         if resp.status_code != 200:
             detail = resp.text[:200].replace("\n", " ")
-            return self._failed(f"HTTP {resp.status_code}: {detail}")
+            self._failed(f"HTTP {resp.status_code}: {detail}")
+            return None
+        return resp
+
+    def send(self, feed: dict[str, Any], signature: str | None = None) -> bool:
+        body = fit(feed)
+        if self._post(self.endpoint, body) is None:
+            return False
         self.last_sent = self.clock()
         self.last_signature = signature or self.signature(feed)
         self.failures = 0

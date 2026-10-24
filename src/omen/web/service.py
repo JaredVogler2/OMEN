@@ -39,6 +39,8 @@ HISTORY_KEY = "omen:history"
 SCAN_LOCK_KEY = "omen:lock:scan"
 LAST_SCAN_KEY = "omen:scan:last_ts"
 INGEST_TS_KEY = "omen:ingest:last_ts"
+ATLAS_KEY = "omen:atlas"
+ATLAS_TS_KEY = "omen:ingest:atlas_ts"
 HISTORY_MAX = 2016  # 7 days at one point per 5 minutes
 MAX_FEED_BYTES = 950_000
 ASSETS = ("BTC", "ETH", "SOL", "XRP", "DOGE")
@@ -573,7 +575,8 @@ class WebService:
         return view
 
     # ------------------------------------------------------------------------------------------------- ingest
-    def ingest(self, body: bytes, headers: dict[str, str]) -> dict:
+    def _verify_signed(self, body: bytes, headers: dict[str, str], ts_key: str) -> dict:
+        """HMAC-signed, fresh, in-order, size-limited JSON from the Pi (shared OMEN_INGEST_SECRET)."""
         secret = os.environ.get("OMEN_INGEST_SECRET", "")
         if len(secret) < 16:
             raise HTTPError(503, "ingest disabled: set OMEN_INGEST_SECRET (16+ characters) here and on the Pi")
@@ -586,16 +589,23 @@ class WebService:
         expected = hmac.new(secret.encode(), f"{ts}.".encode() + body, hashlib.sha256).hexdigest()
         if not hmac.compare_digest(expected, headers.get("x-omen-sig", "")):
             raise HTTPError(401, "bad signature")
-        last = self.store.get(INGEST_TS_KEY)
+        last = self.store.get(ts_key)
         if last and ts <= int(last):
             raise HTTPError(409, "replayed or out-of-order snapshot")
         if len(body) > MAX_FEED_BYTES:
             raise HTTPError(413, "snapshot too large")
         try:
-            feed = json.loads(body)
+            doc = json.loads(body)
         except json.JSONDecodeError:
             raise HTTPError(400, "snapshot is not JSON") from None
-        if feed.get("version") != 1 or not isinstance(feed.get("plays"), list):
+        if not isinstance(doc, dict) or doc.get("version") != 1:
+            raise HTTPError(400, "unsupported snapshot version")
+        self.store.set(ts_key, str(ts))
+        return doc
+
+    def ingest(self, body: bytes, headers: dict[str, str]) -> dict:
+        feed = self._verify_signed(body, headers, INGEST_TS_KEY)
+        if not isinstance(feed.get("plays"), list):
             raise HTTPError(400, "unsupported snapshot version")
         now = self.clock()
         meta = {
@@ -606,7 +616,6 @@ class WebService:
         }
         self.store.set(FEED_KEY, body.decode())
         self.store.set(FEED_META_KEY, json.dumps(meta))
-        self.store.set(INGEST_TS_KEY, str(ts))
         paper = feed.get("paper", {}).get("totals", [])
         settled = sum((r.get("pnl") or 0) for r in paper if r.get("status") == "settled")
         self.store.lpush_trim(
@@ -623,3 +632,29 @@ class WebService:
             HISTORY_MAX,
         )
         return {"ok": True, "stored_bytes": len(body)}
+
+    # -------------------------------------------------------------------------------------------------- atlas
+    def ingest_atlas(self, body: bytes, headers: dict[str, str]) -> dict:
+        doc = self._verify_signed(body, headers, ATLAS_TS_KEY)
+        if not isinstance(doc.get("cells"), list):
+            raise HTTPError(400, "not an atlas")
+        self.store.set(ATLAS_KEY, body.decode())
+        return {"ok": True, "edges": len(doc.get("edges") or [])}
+
+    def atlas(self) -> dict:
+        """The Pi's latest calibration atlas, else the snapshot committed in the repository."""
+        try:
+            raw = self.store.get(ATLAS_KEY)
+        except StoreError:
+            raw = None
+        if raw:
+            doc = json.loads(raw)
+            doc["source"] = "pi"
+            return doc
+        path = self.settings.project_root / "config" / "atlas.json"
+        try:
+            doc = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return {"version": 1, "cells": [], "overall": [], "edges": [], "markets": 0, "source": "none"}
+        doc["source"] = "repository"
+        return doc

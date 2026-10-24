@@ -60,6 +60,19 @@ KXSOLE = "SOL"
 KXXRPD = "XRP"
 KXDOGED = "DOGE"
 
+[edge]
+# Calibration edges (MODEL tier, shadow until promoted): live markets in a category x time-to-close x price band
+# where the atlas (`omen atlas`, rebuilt weekly) found Kalshi's prices wrong after fees, confirmed on held-out weeks.
+# Dormant while no validated edge exists.
+enabled = true
+max_atlas_age_days = 21
+prior_sd = 0.03                   # shrinks measured mispricings toward 0 (true ones are usually small)
+min_confidence = 0.90             # P(after-fee edge > 0) needed for a signal
+min_ev = 0.01                     # expected profit per contract after fees, dollars
+kelly_fraction = 0.25             # suggested stake = 1/4 Kelly x bankroll
+bankroll_usd = "1000"
+max_capital_usd = "200"
+
 [gates]
 # A model's plays reach #kalshi-plays only after these pass on resolved shadow data AND `omen promote` is run.
 min_resolved_signals = 150

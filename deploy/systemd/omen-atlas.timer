@@ -1,0 +1,10 @@
+[Unit]
+Description=OMEN calibration atlas rebuild (Sundays 04:20 local time)
+
+[Timer]
+OnCalendar=Sun *-*-* 04:20:00
+RandomizedDelaySec=20min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
