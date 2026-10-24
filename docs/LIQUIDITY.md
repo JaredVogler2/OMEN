@@ -90,7 +90,25 @@ down. The first forward paper run met exactly this on Trump-approval markets tha
 
 ### 3. Forward paper test on live data
 
-<!-- FORWARD_RESULTS -->
+First day, Saturday 2026-10-24, about 4–5 hours, $1,000 cap, paper only. Rewards are estimated with the filed
+formula. "Settled" is real settlement P&L on the paper positions, and "open" is the remaining positions marked at
+the mid.
+
+| Run | Rewards | Settled P&L | Open (marked) | Net | Realized (rewards + settled) |
+|---|---|---|---|---|---|
+| `stop_before_close_minutes = 120` (5.2 h) | +$40.02 | −$49.96 | +$73.02 | +$63.08 | **−$9.94** |
+| `stop_before_close_minutes = 720` (3.9 h) | +$37.20 | $0.00 | +$22.19 | +$59.39 | **+$37.20** |
+
+Fees were $0: the bot only places post-only maker orders, and these series charge makers nothing.
+
+The 2-hour run's bids on Trump-approval markets filled in the hours before the 1 PM reading that settles them. They
+lost more at settlement than all the rewards earned, which is the late-fill effect in §2. The 12-hour run did not
+hold those positions.
+
+This is one weekend day. Rewards came mostly from Trump approval (about 60%), Rotten Tomatoes and EO-week markets,
+and the open positions settle over the following days. Treat it as a direction, not proof. Run paper on the Pi for
+several weekdays before risking money, then start live small (see below) and compare Kalshi's actual reward credits
+with `omen lp status`.
 
 ## Risks, plainly
 
