@@ -128,7 +128,7 @@ dead_side_exclude_series = '15M$|^KXTEMP\w*H$|RATEH$|^KXCRYPTOLEAD'
 # skip markets where people sell into 1c bids faster than the reward pays for (trailing 24 h; contracts per minute
 # such a bid rested, at 1c each, must cost at most this share of the reward)
 dead_side_max_flow_ratio = 0.5
-dead_side_flow_prior = 1.0        # contracts a minute assumed until 30 minutes of 1c bids were seen
+dead_side_flow_prior = 3.0        # contracts a minute assumed until 30 minutes of 1c bids were seen (median 2.8)
 dead_side_stop_before_close_minutes = 360   # dead-side bids lose at most 1c a contract; 6 h beat 12 h in the replay
 
 summary_every_hours = 6
