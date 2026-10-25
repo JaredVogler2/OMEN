@@ -110,12 +110,16 @@ class LiquidityService:
         stats: dict = {"time": now.isoformat(timespec="seconds"), "mode": self.mode}
         if self.kill_file().exists():
             self._accrue(now, {})
-            if not self._killed:
+            if self.venue.orders:  # every killed cycle until none is left: a cancel can fail (e.g. a 429)
                 self.venue.cancel_all()
+            if not self._killed:
                 self._killed = True
+                left = len(self.venue.orders)
                 self._say(
                     "Liquidity quoting stopped (kill switch)",
-                    f"{self.kill_file()} exists; every resting order was canceled.",
+                    f"{self.kill_file()} exists; every resting order was canceled."
+                    if not left
+                    else f"{self.kill_file()} exists; {left} cancel(s) failed and are retried every cycle.",
                     "warning",
                 )
             stats["killed"] = True
@@ -524,3 +528,5 @@ class LiquidityService:
                     sleep(max(0.0, self.cfg.cycle_seconds - (time.monotonic() - started)))
         finally:
             self.venue.cancel_all()
+            if self.venue.orders:  # still resting on Kalshi: the next start cancels them (cancel_stale)
+                log.error("%d order(s) could not be canceled on exit", len(self.venue.orders))

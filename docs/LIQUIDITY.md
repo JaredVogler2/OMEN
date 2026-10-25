@@ -373,4 +373,12 @@ say whether the balance counts cash held by resting orders. The command works th
 consecutive snapshots where only our resting orders changed, and says how many pairs agree. It assumes the
 account trades only through OMEN, which only buys: trade by hand on a separate account.
 
+**API budget.** Kalshi charges nothing per request; it meters them in tokens
+([rate limits](https://docs.kalshi.com/getting_started/rate_limits)). On the Basic tier a request costs 10 tokens,
+reads get 200 tokens a second (20 requests), writes (orders and cancels) 100 (10 a second), and the balance has its
+own bucket of one call a second. A dead-side-only trial measured 28–84 requests a minute (under 1.5 a second),
+mostly public order books and trades; live adds a few order writes and one balance read a minute. A cancel that
+hits a 429 is retried, and one that still fails stays tracked and is retried next cycle, so no bid is ever left
+behind unmanaged or doubled.
+
 Settings live in the `[liquidity]` section of `config/omen.toml`; every key is commented there.

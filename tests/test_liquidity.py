@@ -10,7 +10,7 @@ import pytest
 
 from omen.alerts.discord import Notifier
 from omen.config import ConfigError, Settings, load_settings
-from omen.http import HttpClient
+from omen.http import HttpClient, HttpError
 from omen.kalshi.client import KalshiClient
 from omen.kalshi.models import OrderBook
 from omen.ledger import Ledger
@@ -125,13 +125,17 @@ class FakeTradingClient:
         self.created: list[dict] = []
         self.cancelled: list[str] = []
         self.fills_resp: dict = {"fills": []}
+        self.fail_cancels = 0  # this many cancels answer 429 (after the HTTP client's own retries)
 
     def create_order(self, body: dict) -> dict:
         self.created.append(body)
         return {"order_id": f"o{len(self.created)}", "fill_count": "0.00", "remaining_count": body["count"]}
 
-    def _signed(self, method: str, path: str, body=None, params=None):
+    def _signed(self, method: str, path: str, body=None, params=None, retry=False):
         if method == "DELETE":
+            if self.fail_cancels:
+                self.fail_cancels -= 1
+                raise HttpError("DELETE -> HTTP 429", 429, "too many requests")
             self.cancelled.append(path.rsplit("/", 1)[-1])
             return {}
         if path == "/portfolio/orders":
@@ -690,3 +694,19 @@ def test_live_cycles_record_the_account_cash_for_reconciling_rewards(tmp_path):
     svc.venue = SimpleNamespace(client=acct, mode="live")
     svc._record_cash(T0)
     assert ledger.lp_cash("paper") == [] and ledger.lp_cash("live") == [(T0, 100.0, 11.0)]
+
+
+def test_a_failed_cancel_keeps_the_order_tracked_and_never_doubles_it():
+    c = FakeTradingClient()
+    v = LiveVenue(c)
+    v.sync([Quote("M", "no", 0.01, 1100)], {}, T0)
+    c.fail_cancels = 1
+    v.sync([Quote("M", "no", 0.02, 1100)], {}, T0)  # the cancel is rate-limited: the old bid is still on Kalshi
+    assert [o.order_id for o in v.orders.values()] == ["o1"] and len(c.created) == 1 and v.errors
+    v.sync([Quote("M", "no", 0.02, 1100)], {}, T0)  # next cycle: canceled, then replaced
+    assert c.cancelled == ["o1"] and c.created[-1]["price"] == "0.9800" and len(c.created) == 2
+    c.fail_cancels = 1
+    v.cancel_all()
+    assert ("M", "no") in v.orders  # still resting: kept so the kill switch or the next start can cancel it
+    v.cancel_all()
+    assert not v.orders and c.cancelled == ["o1", "o2"]

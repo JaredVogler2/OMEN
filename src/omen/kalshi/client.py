@@ -89,10 +89,13 @@ class KalshiClient:
         return books
 
     # ------------------------------------------------------------------------------------------ signed (exec)
-    def _signed(self, method: str, path: str, body: Any = None, params: Any = None) -> Any:
+    def _signed(self, method: str, path: str, body: Any = None, params: Any = None, retry: bool = False) -> Any:
+        """``retry``: also retry a non-GET on 429/5xx/network errors (only for idempotent calls such as cancels)."""
         if self.signer is None:
             raise RuntimeError("no Kalshi API key configured")
-        resp = self.http.request(method, path, params=params, json_body=body, header_factory=self.signer.headers)
+        resp = self.http.request(
+            method, path, params=params, json_body=body, header_factory=self.signer.headers, retry_on_post=retry
+        )
         return resp.json() if resp.content else {}
 
     def balance(self) -> dict:
