@@ -314,6 +314,8 @@ class LiquidityService:
             book = self.books.get(p.ticker)
             if m is None or book is None or not m.tradable:
                 return None
+            if m.exchange_index not in self.cfg.exchange_indexes:
+                return None  # an order there needs funds on that shard (Kalshi keeps a balance per shard)
             if m.close_time is not None and m.close_time - now < timedelta(minutes=stop_minutes):
                 return None
             return book

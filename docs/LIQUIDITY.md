@@ -364,6 +364,24 @@ Going live, after paper looks right for several days:
 4. After the first reward periods end, run `omen lp reconcile`. Scale up only if what Kalshi paid is close to the
    estimate.
 
+What Kalshi's API docs (read in full on 2026-10-25) mean for a live run:
+
+* **Shards.** Kalshi runs several matching engines and keeps a balance on each; an API order fails unless its
+  shard holds the funds (the app moves money automatically, the API does not). 97% of rewarded markets trade on
+  shard 0, so OMEN quotes only `exchange_indexes = [0]`. Fund another shard (target balance allocation or an
+  intra-account transfer) before listing it.
+* **Orders Kalshi cancels by itself.** Every Thursday 3–5 AM ET is a trading pause, and OMEN's orders carry
+  `cancel_order_on_pause`, so they are cancelled. Kalshi also cancels resting orders when a paused market
+  reactivates, after close, and below a raised settlement floor. The live venue re-reads its resting orders every
+  cycle, drops the ones Kalshi no longer has, and places them again.
+* **Location attestation.** Since August 2026 each API key carries `api_key_region_expiration_ts`
+  (`GET /api_keys`); after that date the key cannot trade Sports, Elections or Entertainment markets, which
+  include Trump-approval and Rotten Tomatoes. Renew the attestation in the Kalshi app before it lapses.
+* **A fixed budget.** Kalshi suggests giving a bot its own subaccount and an API key restricted to it (Advanced
+  API tier, a free self-upgrade). That caps what the bot can touch at what you transfer in.
+* **Sub-cent prices.** Some markets accept prices below 1¢ near the edges (0.1¢ steps). Only 2.7% of rewarded
+  markets did on 2026-10-25, so OMEN still bids 1¢.
+
 **How `omen lp reconcile` measures payouts.** Kalshi has no endpoint for reward credits; they arrive as cash. In
 live mode every cycle records the account balance and the cash its resting buy orders hold. Reconciling fetches
 everything else that moved cash in that window: fills and their fees, settlements, deposits and withdrawals. The

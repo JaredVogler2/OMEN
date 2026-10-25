@@ -194,6 +194,7 @@ class LiquiditySettings:
     # a dead-side bid loses at most 1c a contract, so it may rest closer to the close than cheap-side quotes: with
     # the flow filter, stops of 12, 6, 3 and 1 h all made money in both halves of the replay; 6 h added 18% over 12 h
     dead_side_stop_before_close_minutes: int = 360
+    exchange_indexes: list[int] = field(default_factory=lambda: [0])  # funded exchange shards to quote on
     summary_every_hours: int = 6
 
 
