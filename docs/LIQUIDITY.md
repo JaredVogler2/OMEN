@@ -40,7 +40,9 @@ each rewarded market.
 * **Quote.** It bids the best price on the cheap side. Size is capped by `capital_per_market_usd`, and inventory
   already held counts against that cap. Quotes are ranked by expected reward per dollar until
   `max_total_capital_usd` is used. No bid is left resting within `stop_before_close_minutes` (12 hours by default)
-  of a market's close, because fills that late lose (Evidence §2).
+  of a market's close, because fills that late lose (Evidence §2). It also skips a bid that cannot bring the
+  period's reward to Kalshi's $1.00 minimum: what it has earned in the program so far, plus the bid's current rate
+  until the period ends (or the bid's stop time), must reach $1.00, or the bid would risk fills for nothing.
 * **Count rewards.** Each interval earns the average of its start and end reward rates under the filed formula. The
   end rate is computed in the new book, with our bid where it actually rested, so a fill or a better bid that
   overtook us cuts it.
@@ -321,6 +323,19 @@ with `omen lp status`.
 * **Estimates vs. payouts.** Paper rewards are computed with the filed formula from the books the bot sees once a
   minute. Kalshi samples every second and pays after each period ends. Start live small and compare Kalshi's actual
   reward credits with `omen lp status` before scaling.
+
+  What the public record shows (`GET /incentive_programs?status=paid_out|closed`, read on 2026-10-25):
+  * Kalshi has marked 319,351 liquidity programs paid, $21.97 million of period rewards since September 2025, and
+    $6.9 million for programs that ended in October 2026 alone.
+  * About 92% of programs are marked paid 6 to 12 hours after they end.
+  * 16,822 programs that ended at least a week ago ($1.07 million) were never paid. In the August–September books,
+    programs in markets quoted on both sides were paid 99–100% of the time and markets with no quotes 12% of the
+    time, so the flag tracks whether anyone qualified. That unpaid money is what an empty side leaves on the table.
+  * It does not show how much any one account received.
+
+  The $1.00 minimum per period matters little for dead sides: replaying August–September with it, 691 of 1,221
+  programs the strategy bid in would have paid under $1.00, but they held only $176 of the $3,279 of formula
+  rewards (5%). The flat $100-a-week replay (full share) nets +$2,456 with the minimum applied instead of +$2,631.
 * **Kalshi's discretion.** The filing lets Kalshi end eligibility for activity "inconsistent with the purpose of the
   Program", and it surveils for non-bona fide orders. The bot's orders are real, fillable bids at the best price,
   which is what the program pays for. It never places orders it intends to cancel before they can trade, and it does

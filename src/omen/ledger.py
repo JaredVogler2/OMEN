@@ -533,6 +533,14 @@ class Ledger:
             "settled_pnl": float(settled["pnl"]),
         }
 
+    def lp_reward_for(self, mode: str, ticker: str, since: datetime) -> float:
+        hour_cut = since.astimezone(UTC).strftime("%Y-%m-%dT%H:00")
+        row = self.db.execute(
+            "SELECT COALESCE(SUM(usd),0) usd FROM lp_rewards WHERE mode=? AND ticker=? AND hour >= ?",
+            (mode, ticker, hour_cut),
+        ).fetchone()
+        return float(row["usd"])
+
     def lp_reward_by_series(self, mode: str, since: datetime) -> list[tuple[str, float]]:
         hour_cut = since.astimezone(UTC).strftime("%Y-%m-%dT%H:00")
         totals: dict[str, float] = {}

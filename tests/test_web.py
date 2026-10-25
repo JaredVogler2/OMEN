@@ -3,7 +3,7 @@
 import asyncio
 import json
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal as D
 
 import httpx
@@ -63,6 +63,7 @@ def site(monkeypatch):
     monkeypatch.setenv("OMEN_INGEST_SECRET", SECRET)
     monkeypatch.delenv("OMEN_SESSION_SECRET", raising=False)
     fake = FakeKalshi()
+    fake.close = datetime.now(UTC) + timedelta(days=2)  # scans here run on the real clock
     s = load_settings(ROOT / "config" / "omen.toml", env={"OMEN_PROJECT_ROOT": str(ROOT)})
     s.lock.min_apr_pct = D("0")
     svc = WebService(

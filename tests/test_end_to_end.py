@@ -34,6 +34,7 @@ class FakeKalshi:
         self.settled: dict[str, str] = {}
         self.trading = True
         self.listed = True  # False: the event's markets have closed and no longer appear in sweeps
+        self.close = CLOSE
 
     def market(self, c):
         t = f"KXELECT-26-{c}"
@@ -49,7 +50,7 @@ class FakeKalshi:
             "yes_ask_dollars": str(D(self.yes_bids[c]) + D("0.02")),
             "yes_bid_size_fp": "100.00",
             "yes_ask_size_fp": "100.00",
-            "close_time": iso(CLOSE),
+            "close_time": iso(self.close),
             "market_type": "binary",
             "price_ranges": [{"start": "0", "end": "1", "step": "0.01"}],
         }

@@ -661,3 +661,15 @@ def test_unreadable_programs_are_skipped_and_reported_once(tmp_path):
     svc._warn_unreadable([pooled])
     svc._warn_unreadable([pooled])
     assert sent == ["Reward programs changed shape"]  # once per new set of fields
+
+
+def test_no_bid_where_the_period_reward_cannot_reach_kalshi_s_1_dollar_minimum(tmp_path):
+    fake = FakeKalshi()
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+    svc, ledger = service(tmp_path, fake)
+    # the program ends at midnight; a dead-side bid earns $50 a day, $1.00 takes 29 minutes
+    fake.now = datetime(2026, 10, 24, 23, 40, tzinfo=UTC)
+    assert svc.step()["dead_quotes"] == 0  # 20 minutes left: at most $0.69, which Kalshi would not pay
+    ledger.lp_add_reward("paper", T0, "KXRT-FILM-90", 0.50, 3600)  # earned earlier in this period
+    fake.now += timedelta(minutes=1)
+    assert svc.step()["dead_quotes"] == 1  # $0.50 so far plus $0.66 more clears the minimum

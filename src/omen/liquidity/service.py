@@ -33,6 +33,7 @@ log = logging.getLogger(__name__)
 REFRESH = timedelta(minutes=5)
 MAX_TAPE_PAGES = 30
 MAX_BACKFILLS = 10  # markets whose 1c selling history is fetched per cycle (a few requests each)
+MIN_PAYOUT_USD = 1.0  # Kalshi pays a program's period reward to an account only if it comes to at least $1.00
 
 
 def policy_from(settings: Settings) -> QuotePolicy:
@@ -310,6 +311,17 @@ class LiquidityService:
                 return None
             return book
 
+        def reaches_min_payout(p: Program, rate: float, stop_minutes: int) -> bool:
+            # a bid that cannot lift this period's reward to $1.00 before the period ends (or we stop) earns nothing
+            m = self.markets.get(p.ticker)
+            until = p.end
+            if m is not None and m.close_time is not None:
+                until = min(until, m.close_time - timedelta(minutes=stop_minutes))
+            projected = rate * max(0.0, (until - now).total_seconds())
+            if projected >= MIN_PAYOUT_USD:
+                return True
+            return projected + self.ledger.lp_reward_for(self.mode, p.ticker, p.start) >= MIN_PAYOUT_USD
+
         for p in self.programs:
             book = usable(p, self.cfg.stop_before_close_minutes)
             if book is None:
@@ -319,6 +331,8 @@ class LiquidityService:
                 rate = reward_rate(p, book, {q.side: (q.price, q.size)})
                 if rate * 86400 / q.size < self.cfg.min_reward_per_contract_day:
                     continue  # the reward would not cover what fills cost on average
+                if not reaches_min_payout(p, rate, self.cfg.stop_before_close_minutes):
+                    continue
                 best[(q.ticker, q.side)] = (rate / max(q.price * q.size, 1e-9), q)
         backfills = 0
         for p in self.dead_programs:
@@ -330,6 +344,8 @@ class LiquidityService:
             if q is None:
                 continue
             rate = reward_rate(p, book, {q.side: (q.price, q.size)})
+            if not reaches_min_payout(p, rate, self.cfg.dead_side_stop_before_close_minutes):
+                continue
             if not self.flow.seeded(p.ticker):
                 if backfills >= MAX_BACKFILLS:
                     continue  # its selling history loads in a later cycle; never bid on a market not yet checked
