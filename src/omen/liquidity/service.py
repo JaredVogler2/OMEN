@@ -27,6 +27,7 @@ from omen.liquidity.maker import (
     without_orders,
 )
 from omen.liquidity.programs import Program, eligible, fetch_active, series_of
+from omen.liquidity.reconcile import take_snapshot
 from omen.liquidity.scoring import snapshot
 
 log = logging.getLogger(__name__)
@@ -144,6 +145,8 @@ class LiquidityService:
         desired = self._desired(now, held)
         self.venue.sync(desired, self.books, now)
         self._rates = self._current_rates()
+        if self.mode == "live":
+            self._record_cash(now)
         settled = self._settle(now, held)
         stats.update(
             programs=len(self.programs),
@@ -400,6 +403,18 @@ class LiquidityService:
                 if rate > 0:
                     self.ledger.lp_add_reward(self.mode, now, ticker, rate * seconds, seconds)
         self._last = now
+
+    def _record_cash(self, now: datetime) -> None:
+        # Kalshi reports no reward credits: `omen lp reconcile` finds them in the balance, from these snapshots
+        client = getattr(self.venue, "client", None)  # the live venue's client is the signed one
+        if client is None:
+            return
+        try:
+            snap = take_snapshot(client, now)
+        except (HttpError, KeyError, TypeError, ValueError) as exc:  # never stop quoting over bookkeeping
+            log.warning("cash snapshot failed: %s", exc)
+            return
+        self.ledger.lp_add_cash(self.mode, now, snap.balance, snap.holds)
 
     def _settle(self, now: datetime, held: dict[str, dict[str, list[float]]]) -> int:
         done = 0

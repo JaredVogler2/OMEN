@@ -349,6 +349,7 @@ with `omen lp status`.
 omen lp programs              # what the policy would earn per dollar in each live program right now
 omen lp run                   # the loop (paper by default); Ctrl-C or SIGTERM cancels every resting order
 omen lp status                # rewards, fills, inventory, settled P&L (day / week / total)
+omen lp reconcile             # live: the rewards Kalshi actually paid, against OMEN's formula estimate
 scripts/install-pi.sh --with-lp   # run it as the omen-lp systemd service next to omen.service
 ```
 
@@ -360,7 +361,16 @@ Going live, after paper looks right for several days:
    `capital_per_market_usd = 10`.
 3. Set `[liquidity] mode = "live"` (or `OMEN_LP_MODE=live`) and
    `OMEN_LIVE_ACK="I accept real-money risk"`, then restart `omen-lp`.
-4. After the first reward periods end, compare Kalshi's reward credits with `omen lp status`. Scale up only if they
-   agree.
+4. After the first reward periods end, run `omen lp reconcile`. Scale up only if what Kalshi paid is close to the
+   estimate.
+
+**How `omen lp reconcile` measures payouts.** Kalshi has no endpoint for reward credits; they arrive as cash. In
+live mode every cycle records the account balance and the cash its resting buy orders hold. Reconciling fetches
+everything else that moved cash in that window: fills and their fees, settlements, deposits and withdrawals. The
+part of the balance change they do not explain is the reward credit. It is set against what OMEN estimated it
+earned until a day before the window's end, since Kalshi pays up to a day after each period. Kalshi's docs do not
+say whether the balance counts cash held by resting orders. The command works that out itself from pairs of
+consecutive snapshots where only our resting orders changed, and says how many pairs agree. It assumes the
+account trades only through OMEN, which only buys: trade by hand on a separate account.
 
 Settings live in the `[liquidity]` section of `config/omen.toml`; every key is commented there.

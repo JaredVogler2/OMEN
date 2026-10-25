@@ -402,6 +402,51 @@ def build_lp(s: Settings):
     return LiquidityService(s, _client(s), ledger, _notifier(s, ledger), venue), ledger
 
 
+def _lp_reconcile(s: Settings, args: argparse.Namespace) -> int:
+    """Kalshi's actual reward credits (the cash nothing else explains) against OMEN's formula estimate."""
+    from zoneinfo import ZoneInfo
+
+    from omen.config import PROD_BASE_URL
+    from omen.kalshi.auth import KalshiSigner
+    from omen.liquidity.reconcile import Snapshot, reconcile
+
+    if not (s.kalshi_api_key_id and s.kalshi_private_key_path):
+        print("reconciling reads the account: set KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PATH", file=sys.stderr)
+        return 2
+    ledger = Ledger(s.database)
+    since = datetime.fromisoformat(args.since) if args.since else None
+    if since is not None and since.tzinfo is None:
+        since = since.replace(tzinfo=UTC)
+    snaps = [Snapshot(ts, b, h) for ts, b, h in ledger.lp_cash("live", since)]
+    if len(snaps) < 2:
+        print("no live cash snapshots yet: `omen lp run` records one every cycle in live mode")
+        return 1
+    signer = KalshiSigner.from_file(s.kalshi_api_key_id, s.kalshi_private_key_path)
+    r = reconcile(KalshiClient(HttpClient(PROD_BASE_URL, rate_per_second=8, max_retries=2), signer), snaps)
+    et = ZoneInfo("America/New_York")
+    f = r.flows
+    print("Kalshi reward credits, measured from the account's cash")
+    span = f"{r.start.astimezone(et):%b %d %I:%M %p} to {r.end.astimezone(et):%b %d %I:%M %p} ET"
+    print(f"  {span}, {len(snaps)} snapshots")
+    print(f"  balance change {r.balance_change:+.2f}")
+    print(
+        f"  explained: fills -{f.fills:.2f}, fees -{f.fees:.2f}, settlements +{f.settlements:.2f}, "
+        f"deposits +{f.deposits:.2f}, withdrawals -{f.withdrawals:.2f}"
+    )
+    if r.paid is None:
+        print("  reward credits: not yet known whether the balance counts cash held by resting orders")
+        print(f"    if it does: ${r.credits[True]:.2f}; if it does not: ${r.credits[False]:.2f}")
+    else:
+        how = "counts" if r.holds_in_balance else "excludes"
+        print(f"  reward credits: ${r.paid:.2f} (the balance {how} resting-order cash; {r.votes} quiet checks agree)")
+    # Kalshi pays up to a day after a period ends: compare with what OMEN estimated it earned until a day earlier
+    est = ledger.lp_reward_between("live", r.start, r.end - timedelta(days=1))
+    print(f"  OMEN's formula estimate, earned until a day before the end: ${est:.2f}")
+    if r.paid is not None and est > 0:
+        print(f"  paid / estimated: {r.paid / est:.0%}")
+    return 0
+
+
 def cmd_lp(s: Settings, args: argparse.Namespace) -> int:
     """Liquidity-reward market making: run the quoting loop, show results, or rank today's reward programs."""
     from omen.liquidity.programs import eligible, fetch_active
@@ -450,6 +495,8 @@ def cmd_lp(s: Settings, args: argparse.Namespace) -> int:
         if sm["by_series"]:
             print("  rewards by series (7 days): " + ", ".join(f"{k} ${v:.2f}" for k, v in sm["by_series"]))
         return 0
+    if args.lp_cmd == "reconcile":
+        return _lp_reconcile(s, args)
     # programs: what the policy would earn per dollar in each live program right now
     client = _client(s)
     lp = s.liquidity
@@ -552,6 +599,8 @@ def main(argv: list[str] | None = None) -> int:
     lr = lps.add_parser("run", help="run the quoting loop (paper unless [liquidity].mode = live)")
     lr.add_argument("--cycles", type=int, default=None, help="stop after this many cycles")
     lps.add_parser("status", help="rewards, fills, inventory and settled P&L")
+    lrc = lps.add_parser("reconcile", help="what Kalshi actually paid in rewards (live), against OMEN's estimate")
+    lrc.add_argument("--since", help="ISO time to start from (default: the first live cash snapshot)")
     lpg = lps.add_parser("programs", help="rank live reward programs by what the policy would earn per dollar")
     lpg.add_argument("--top", type=int, default=25)
     lpp.set_defaults(fn=cmd_lp)

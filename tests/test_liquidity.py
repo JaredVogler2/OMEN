@@ -673,3 +673,20 @@ def test_no_bid_where_the_period_reward_cannot_reach_kalshi_s_1_dollar_minimum(t
     ledger.lp_add_reward("paper", T0, "KXRT-FILM-90", 0.50, 3600)  # earned earlier in this period
     fake.now += timedelta(minutes=1)
     assert svc.step()["dead_quotes"] == 1  # $0.50 so far plus $0.66 more clears the minimum
+
+
+def test_live_cycles_record_the_account_cash_for_reconciling_rewards(tmp_path):
+    from types import SimpleNamespace
+
+    from test_reconcile import FakeAccount
+
+    fake = FakeKalshi()
+    svc, ledger = service(tmp_path, fake)
+    svc._record_cash(T0)  # paper: there is no account to read
+    acct = FakeAccount(
+        100.0,
+        orders=[{"outcome_side": "no", "no_price_dollars": "0.0100", "remaining_count_fp": "1100.00"}],
+    )
+    svc.venue = SimpleNamespace(client=acct, mode="live")
+    svc._record_cash(T0)
+    assert ledger.lp_cash("paper") == [] and ledger.lp_cash("live") == [(T0, 100.0, 11.0)]
