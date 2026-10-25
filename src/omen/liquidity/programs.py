@@ -48,20 +48,26 @@ class Program:
 
     @classmethod
     def from_api(cls, d: dict) -> Program | None:
+        """A program, or None for another incentive type or an entry this code cannot read (a new API shape must
+        not stop the loop: callers count the misses)."""
         if d.get("incentive_type") != "liquidity" or not d.get("target_size_fp"):
             return None
-        return cls(
-            ticker=d["market_ticker"],
-            start=_ts(d["start_date"]),
-            end=_ts(d["end_date"]),
-            reward_usd=float(d["period_reward"]) / 10_000,
-            target=float(d["target_size_fp"]),
-            discount=(d.get("discount_factor_bps") or 10_000) / 10_000,
-        )
+        try:
+            return cls(
+                ticker=d["market_ticker"],
+                start=_ts(d["start_date"]),
+                end=_ts(d["end_date"]),
+                reward_usd=float(d["period_reward"]) / 10_000,
+                target=float(d["target_size_fp"]),
+                discount=(d.get("discount_factor_bps") or 10_000) / 10_000,
+            )
+        except (KeyError, TypeError, ValueError, AttributeError):
+            return None
 
 
-def fetch_active(http: HttpClient) -> list[Program]:
-    """Every active liquidity program (paginated with ``next_cursor``)."""
+def fetch_active(http: HttpClient, unreadable: list[dict] | None = None) -> list[Program]:
+    """Every active liquidity program (paginated with ``next_cursor``). Liquidity entries that cannot be read are
+    appended to ``unreadable`` when given."""
     out: list[Program] = []
     cursor = ""
     while True:
@@ -73,6 +79,8 @@ def fetch_active(http: HttpClient) -> list[Program]:
             p = Program.from_api(raw)
             if p is not None:
                 out.append(p)
+            elif unreadable is not None and raw.get("incentive_type") == "liquidity":
+                unreadable.append(raw)
         cursor = data.get("next_cursor") or ""
         if not cursor:
             return out

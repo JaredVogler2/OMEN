@@ -89,6 +89,7 @@ class LiquidityService:
         self.flow = DeadSideFlow()
         self._flow_at: datetime | None = None
         self._flow_minutes = 0.0
+        self._seen_shapes: set[tuple[str, ...]] = set()
         self._sold: dict[str, float] = {}  # contracts the tape showed sold into 1c dead-side bids this interval
         self._killed = False
         self._last_summary: datetime | None = None
@@ -161,12 +162,15 @@ class LiquidityService:
         return stats
 
     def _refresh(self, now: datetime) -> None:
+        unreadable: list[dict] = []
         try:
-            active = fetch_active(self.client.http)
+            active = fetch_active(self.client.http, unreadable)
         except HttpError as exc:
             self.last_error = f"incentive programs: {exc}"
             log.warning(self.last_error)
             return
+        if unreadable:
+            self._warn_unreadable(unreadable)
         self.programs = eligible(
             active,
             now,
@@ -396,6 +400,21 @@ class LiquidityService:
         return done
 
     # ------------------------------------------------------------------------------------------------ reporting
+    def _warn_unreadable(self, raw: list[dict]) -> None:
+        """Kalshi's programs changed shape (the Oct 28, 2026 amendment pools rewards by sub-category): say so once per
+        new set of fields, and keep quoting the programs that still read."""
+        shape = tuple(sorted({k for r in raw for k in r}))
+        if shape in self._seen_shapes:
+            return
+        self._seen_shapes.add(shape)
+        log.warning("%d liquidity programs could not be read; fields: %s", len(raw), ", ".join(shape))
+        self._say(
+            "Reward programs changed shape",
+            f"{len(raw)} liquidity programs could not be read and are skipped. Fields: {', '.join(shape)}. "
+            "The other programs are still quoted; OMEN needs an update to use these.",
+            "warning",
+        )
+
     def _say(self, title: str, body: str, severity: str) -> None:
         self.notifier.queue(
             "research", notice_payload(f"[{self.mode}] {title}", body, severity), "lp", None, self.clock()

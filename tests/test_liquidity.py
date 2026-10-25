@@ -632,3 +632,32 @@ def test_the_default_flow_prior_keeps_unknown_low_reward_markets_out(tmp_path):
     assert svc.cfg.dead_side_flow_prior == 3.0
     # no selling history: 3 contracts a minute would cost $43.20 a day, more than half of the $50 a day the bid earns
     assert svc.step()["dead_quotes"] == 0
+
+
+def test_unreadable_programs_are_skipped_and_reported_once(tmp_path):
+    from omen.liquidity.programs import Program
+
+    good = {
+        "market_ticker": "M",
+        "incentive_type": "liquidity",
+        "start_date": "2026-10-28T00:00:00Z",
+        "end_date": "2026-10-29T00:00:00Z",
+        "period_reward": 100_000,
+        "target_size_fp": "500.00",
+    }
+    pooled = {
+        "eligible_market": "Daily temperature",
+        "incentive_type": "liquidity",
+        "target_size_fp": "500.00",
+        "period_reward": 150_000_000,
+    }
+    assert Program.from_api(good) is not None
+    assert Program.from_api(pooled) is None  # no market ticker or dates: skipped, not a crash
+
+    fake = FakeKalshi()
+    svc, _ = service(tmp_path, fake)
+    sent = []
+    svc._say = lambda title, body, severity: sent.append(title)
+    svc._warn_unreadable([pooled])
+    svc._warn_unreadable([pooled])
+    assert sent == ["Reward programs changed shape"]  # once per new set of fields
