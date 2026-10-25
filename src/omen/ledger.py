@@ -66,6 +66,8 @@ CREATE TABLE IF NOT EXISTS lp_rewards (
 CREATE TABLE IF NOT EXISTS lp_settlements (
   mode TEXT NOT NULL, ticker TEXT NOT NULL, result TEXT NOT NULL, ts TEXT NOT NULL, cost REAL NOT NULL,
   payout REAL NOT NULL, PRIMARY KEY(mode, ticker));
+CREATE TABLE IF NOT EXISTS lp_cash (
+  mode TEXT NOT NULL, ts TEXT NOT NULL, balance REAL NOT NULL, holds REAL NOT NULL, PRIMARY KEY(mode, ts));
 """
 
 
@@ -532,6 +534,25 @@ class Ledger:
             "settled_markets": float(settled["n"]),
             "settled_pnl": float(settled["pnl"]),
         }
+
+    def lp_add_cash(self, mode: str, ts: datetime, balance: float, holds: float) -> None:
+        self.db.execute(
+            "INSERT OR REPLACE INTO lp_cash(mode,ts,balance,holds) VALUES(?,?,?,?)", (mode, iso(ts), balance, holds)
+        )
+
+    def lp_cash(self, mode: str, since: datetime | None = None) -> list[tuple[datetime, float, float]]:
+        rows = self.db.execute(
+            "SELECT ts, balance, holds FROM lp_cash WHERE mode=? AND ts >= ? ORDER BY ts",
+            (mode, iso(since) if since else ""),
+        )
+        return [(datetime.fromisoformat(r["ts"]), float(r["balance"]), float(r["holds"])) for r in rows]
+
+    def lp_reward_between(self, mode: str, start: datetime, end: datetime) -> float:
+        row = self.db.execute(
+            "SELECT COALESCE(SUM(usd),0) usd FROM lp_rewards WHERE mode=? AND hour >= ? AND hour < ?",
+            (mode, start.astimezone(UTC).strftime("%Y-%m-%dT%H:00"), end.astimezone(UTC).strftime("%Y-%m-%dT%H:00")),
+        ).fetchone()
+        return float(row["usd"])
 
     def lp_reward_for(self, mode: str, ticker: str, since: datetime) -> float:
         hour_cut = since.astimezone(UTC).strftime("%Y-%m-%dT%H:00")
