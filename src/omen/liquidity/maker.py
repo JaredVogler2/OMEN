@@ -313,6 +313,9 @@ class PaperVenue:
         self.orders.clear()
 
 
+RECONCILE_GRACE = timedelta(seconds=30)
+
+
 class LiveVenue:
     """Real resting orders: post-only (never takes), good till canceled, canceled if trading pauses."""
 
@@ -356,7 +359,41 @@ class LiveVenue:
                 return False
         return True
 
+    def reconcile(self, now: datetime) -> int:
+        """Drop orders Kalshi no longer has resting and refresh remaining sizes; returns how many were dropped.
+
+        Kalshi cancels orders on its own: at every trading pause (Thursdays 3-5 AM ET) for orders placed with
+        cancel_order_on_pause, when a paused market reactivates, after close, and below a raised settlement floor.
+        Orders younger than RECONCILE_GRACE are left alone: the API can lag the exchange by a moment."""
+        rows: list[dict] = []
+        cursor = ""
+        for _ in range(20):
+            params: dict = {"status": "resting", "limit": 200}
+            if cursor:
+                params["cursor"] = cursor
+            try:
+                data = self.client._signed("GET", "/portfolio/orders", params=params)
+            except HttpError as exc:
+                self.errors.append(f"resting orders: {exc}")
+                return 0  # keep the local book as it is; try again next cycle
+            rows.extend(data.get("orders") or [])
+            cursor = data.get("cursor") or ""
+            if not cursor:
+                break
+        resting = {o.get("order_id"): o for o in rows}
+        dropped = 0
+        for key, o in list(self.orders.items()):
+            live = resting.get(o.order_id)
+            if live is not None:
+                if live.get("remaining_count_fp") is not None:
+                    o.size = float(live["remaining_count_fp"])
+            elif now - o.placed >= RECONCILE_GRACE:
+                del self.orders[key]
+                dropped += 1
+        return dropped
+
     def sync(self, desired: list[Quote], books: dict[str, OrderBook], now: datetime) -> None:
+        self.reconcile(now)
         want = {(q.ticker, q.side): q for q in desired}
         for key in list(self.orders):
             if (key not in want or not _keep(self.orders[key], want[key])) and self._cancel(self.orders[key]):

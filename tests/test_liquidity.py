@@ -126,6 +126,7 @@ class FakeTradingClient:
         self.cancelled: list[str] = []
         self.fills_resp: dict = {"fills": []}
         self.fail_cancels = 0  # this many cancels answer 429 (after the HTTP client's own retries)
+        self.resting: list[dict] | None = None  # what Kalshi reports as resting (None: a previous run's leftovers)
 
     def create_order(self, body: dict) -> dict:
         self.created.append(body)
@@ -139,6 +140,8 @@ class FakeTradingClient:
             self.cancelled.append(path.rsplit("/", 1)[-1])
             return {}
         if path == "/portfolio/orders":
+            if self.resting is not None:
+                return {"orders": self.resting, "cursor": ""}
             return {
                 "orders": [
                     {"order_id": "old1", "ticker": "M", "client_order_id": "omen-lp-abc"},
@@ -251,6 +254,7 @@ class FakeKalshi:
         self.history: list[dict] = []  # trades returned for a single-market query (flow backfill)
         self.candles: list[dict] = []
         self.close = "2026-11-01T00:00:00Z"
+        self.shard = 0
         self.book = {"yes_dollars": [["0.0500", "500.00"]], "no_dollars": [["0.9300", "2000.00"]]}
 
     def handler(self, request: httpx.Request) -> httpx.Response:
@@ -303,6 +307,7 @@ class FakeKalshi:
                             "result": self.result,
                             "close_time": self.close,
                             "market_type": "binary",
+                            "exchange_index": self.shard,
                         }
                         for t in q.get("tickers", [""])[0].split(",")
                     ],
@@ -710,3 +715,38 @@ def test_a_failed_cancel_keeps_the_order_tracked_and_never_doubles_it():
     assert ("M", "no") in v.orders  # still resting: kept so the kill switch or the next start can cancel it
     v.cancel_all()
     assert not v.orders and c.cancelled == ["o1", "o2"]
+
+
+def test_orders_kalshi_cancelled_on_its_own_are_dropped_and_placed_again():
+    c = FakeTradingClient()
+    v = LiveVenue(c)
+    v.sync([Quote("M", "no", 0.01, 1100), Quote("N", "no", 0.01, 1100)], {}, T0)
+    assert len(c.created) == 2
+    # Thursday's trading pause cancelled both (cancel_order_on_pause); one partly filled before
+    c.resting = [{"order_id": "o2", "remaining_count_fp": "700.00"}]
+    later = T0 + timedelta(minutes=1)
+    assert v.reconcile(later) == 1
+    assert ("M", "no") not in v.orders and v.orders[("N", "no")].size == 700.0
+    v.sync([Quote("M", "no", 0.01, 1100), Quote("N", "no", 0.01, 1100)], {}, later)
+    assert len(c.created) == 3 and c.created[-1]["ticker"] == "M"  # M is placed again; N keeps its 700
+
+
+def test_a_just_placed_order_is_not_dropped_before_kalshi_lists_it():
+    c = FakeTradingClient()
+    v = LiveVenue(c)
+    c.resting = []
+    v.sync([Quote("M", "no", 0.01, 1100)], {}, T0)
+    assert v.reconcile(T0 + timedelta(seconds=5)) == 0 and ("M", "no") in v.orders
+    assert v.reconcile(T0 + timedelta(seconds=31)) == 1
+
+
+def test_no_bids_on_an_exchange_shard_the_account_has_not_funded(tmp_path):
+    fake = FakeKalshi()
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+    fake.shard = 2  # commodities and crypto trade on shard 2, with a balance of their own
+    svc, _ = service(tmp_path, fake)
+    assert svc.step()["dead_quotes"] == 0
+    svc.cfg.exchange_indexes = [0, 2]  # after funding shard 2
+    svc._refreshed = None
+    fake.now = T0 + timedelta(minutes=1)
+    assert svc.step()["dead_quotes"] == 1

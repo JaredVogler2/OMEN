@@ -105,6 +105,7 @@ class Market:
     settlement_value: Decimal | None
     grid: PriceGrid
     market_type: str
+    exchange_index: int = 0  # the matching engine (shard) the market trades on; API orders need funds there
 
     @classmethod
     def from_api(cls, d: dict) -> Market:
@@ -136,6 +137,7 @@ class Market:
             settlement_value=dec(d["settlement_value_dollars"]) if d.get("settlement_value_dollars") else None,
             grid=PriceGrid.from_api(d.get("price_ranges")),
             market_type=d.get("market_type") or "binary",
+            exchange_index=int(d.get("exchange_index") or 0),
         )
 
     @property

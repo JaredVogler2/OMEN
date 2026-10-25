@@ -130,5 +130,9 @@ dead_side_exclude_series = '15M$|^KXTEMP\w*H$|RATEH$|^KXCRYPTOLEAD'
 dead_side_max_flow_ratio = 0.5
 dead_side_flow_prior = 3.0        # contracts a minute assumed until 30 minutes of 1c bids were seen (median 2.8)
 dead_side_stop_before_close_minutes = 360   # dead-side bids lose at most 1c a contract; 6 h beat 12 h in the replay
+# Kalshi runs several matching engines (shards) and keeps a balance on each; an API order fails unless its shard
+# holds the funds. 97% of rewarded markets trade on shard 0 (Oct 2026); list others only after funding them
+# (Kalshi's target balance allocation or an intra-account transfer).
+exchange_indexes = [0]
 
 summary_every_hours = 6
