@@ -632,3 +632,44 @@ def test_the_default_flow_prior_keeps_unknown_low_reward_markets_out(tmp_path):
     assert svc.cfg.dead_side_flow_prior == 3.0
     # no selling history: 3 contracts a minute would cost $43.20 a day, more than half of the $50 a day the bid earns
     assert svc.step()["dead_quotes"] == 0
+
+
+def test_unreadable_programs_are_skipped_and_reported_once(tmp_path):
+    from omen.liquidity.programs import Program
+
+    good = {
+        "market_ticker": "M",
+        "incentive_type": "liquidity",
+        "start_date": "2026-10-28T00:00:00Z",
+        "end_date": "2026-10-29T00:00:00Z",
+        "period_reward": 100_000,
+        "target_size_fp": "500.00",
+    }
+    pooled = {
+        "eligible_market": "Daily temperature",
+        "incentive_type": "liquidity",
+        "target_size_fp": "500.00",
+        "period_reward": 150_000_000,
+    }
+    assert Program.from_api(good) is not None
+    assert Program.from_api(pooled) is None  # no market ticker or dates: skipped, not a crash
+
+    fake = FakeKalshi()
+    svc, _ = service(tmp_path, fake)
+    sent = []
+    svc._say = lambda title, body, severity: sent.append(title)
+    svc._warn_unreadable([pooled])
+    svc._warn_unreadable([pooled])
+    assert sent == ["Reward programs changed shape"]  # once per new set of fields
+
+
+def test_no_bid_where_the_period_reward_cannot_reach_kalshi_s_1_dollar_minimum(tmp_path):
+    fake = FakeKalshi()
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+    svc, ledger = service(tmp_path, fake)
+    # the program ends at midnight; a dead-side bid earns $50 a day, $1.00 takes 29 minutes
+    fake.now = datetime(2026, 10, 24, 23, 40, tzinfo=UTC)
+    assert svc.step()["dead_quotes"] == 0  # 20 minutes left: at most $0.69, which Kalshi would not pay
+    ledger.lp_add_reward("paper", T0, "KXRT-FILM-90", 0.50, 3600)  # earned earlier in this period
+    fake.now += timedelta(minutes=1)
+    assert svc.step()["dead_quotes"] == 1  # $0.50 so far plus $0.66 more clears the minimum
