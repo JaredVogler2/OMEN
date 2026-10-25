@@ -188,8 +188,9 @@ class LiquiditySettings:
     dead_side_exclude_series: str = r"15M$|^KXTEMP\w*H$|RATEH$|^KXCRYPTOLEAD"
     # bid only while the trailing 24 h of sales into 1c dead-side bids, at 1c each, cost at most this share of the
     # reward the bid earns; with under 30 minutes of such bids seen, assume dead_side_flow_prior contracts a minute
+    # (the median across 5,607 decided rewarded markets of Oct 17-23 was 2.8; the mean 9.0)
     dead_side_max_flow_ratio: float = 0.5
-    dead_side_flow_prior: float = 1.0
+    dead_side_flow_prior: float = 3.0
     # a dead-side bid loses at most 1c a contract, so it may rest closer to the close than cheap-side quotes: with
     # the flow filter, stops of 12, 6, 3 and 1 h all made money in both halves of the replay; 6 h added 18% over 12 h
     dead_side_stop_before_close_minutes: int = 360

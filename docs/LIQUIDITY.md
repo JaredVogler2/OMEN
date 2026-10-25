@@ -187,8 +187,9 @@ side we complete is the one with no such bid. The corrected replay measures sale
 at most `dead_side_max_flow_ratio` (default 0.5) times the reward the bid earns:
 
 * **Inputs:** the rate is per supply minute and comes from the public tape (`DeadSideFlow`).
-* **Before history:** until 30 supply minutes were seen, it assumes `dead_side_flow_prior`, 1 contract a minute ($14.40
-  a day).
+* **Before history:** until 30 supply minutes were seen, it assumes `dead_side_flow_prior`, 3 contracts a minute
+  ($43.20 a day). Across the 5,607 decided rewarded markets of Oct 17–23 with enough history, the median was 2.8 and
+  the mean 9.0.
 * **No lookahead:** the decision uses only the past.
 
 | 6,280 decided market-days in settled rewarded markets (favorite bid 97–98¢, 12+ h before close) | Net per decided market-day (95%, resampling series) |
@@ -219,6 +220,29 @@ the replay gave these totals:
 * **Shorter stops are uneven:** each step shorter costs the older half a little and helps the newer half more.
 * **Why 6 hours:** it adds 18% over 12 hours and gives up 5% in the older half. The 1-hour gain comes mostly
   from the newer half alone, so it isn't used.
+
+**A $100 account, one week.** I replayed every rewarded market of Oct 17–23, 2026 (8,050 that were decided at some
+point) minute by minute.
+
+* **The account:** $100 in resting bids plus positions, at most, under the dead-side rules above, with
+  `dead_side_max_loss_usd = 15`.
+* **When it bids:** only in minutes when the dead side had no bid at all, so our bid would be the whole side.
+* **Fills:** charged at each market's measured selling rate, and settled on the real results.
+* **What's unknown:** history has no order-book depth, so it cannot say how often the favorite's side met the target,
+  which the reward also needs. The columns scale the reward to bracket that.
+
+| Day (ET) | Full reward | Half | A quarter |
+|---|---|---|---|
+| Sat 10-17 | $121.62 | $101.75 | $98.23 |
+| Sun 10-18 | $171.25 | $125.35 | $109.70 |
+| Mon 10-19 | $236.35 | $153.70 | $123.29 |
+| Tue 10-20 | $291.36 | $175.22 | $131.06 |
+| Wed 10-21 | $398.50 | $225.59 | $150.28 |
+| Thu 10-22 | $553.87 | $296.16 | $184.39 |
+| Fri 10-23 | **$654.95** | **$346.13** | **$205.05** |
+
+It is one week, and the rewards are the filed formula's, not Kalshi's payouts. Treat it as what a live trial should
+roughly reproduce, not as a forecast.
 
 **How to read these numbers:**
 

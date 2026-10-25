@@ -312,6 +312,7 @@ def service(tmp_path, fake: FakeKalshi) -> tuple[LiquidityService, Ledger]:
     s = Settings()
     s.state_dir = tmp_path
     s.liquidity.capital_per_market_usd = 25
+    s.liquidity.dead_side_flow_prior = 1.0  # the $100/day test program could not afford the default 3 a minute
     client = KalshiClient(
         HttpClient(
             "https://api.test/trade-api/v2",
@@ -621,3 +622,13 @@ def test_no_dead_side_bid_before_the_market_s_selling_history_is_loaded(tmp_path
         service_module.MAX_BACKFILLS = limit
     fake.now = T0 + timedelta(minutes=1)
     assert svc.step()["dead_quotes"] == 1  # loaded now: quiet history, so the bid goes in
+
+
+def test_the_default_flow_prior_keeps_unknown_low_reward_markets_out(tmp_path):
+    fake = FakeKalshi()
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+    svc, _ = service(tmp_path, fake)
+    svc.cfg.dead_side_flow_prior = Settings().liquidity.dead_side_flow_prior
+    assert svc.cfg.dead_side_flow_prior == 3.0
+    # no selling history: 3 contracts a minute would cost $43.20 a day, more than half of the $50 a day the bid earns
+    assert svc.step()["dead_quotes"] == 0
