@@ -343,21 +343,27 @@ class LiveVenue:
             "cancel_order_on_pause": True,
         }
 
-    def _cancel(self, o: Resting) -> None:
+    def _cancel(self, o: Resting) -> bool:
+        """True once the order is gone. A cancel is safe to repeat, so it is retried on 429 (Basic tier: 100 write
+        tokens a second, 10 per cancel); one that still fails stays tracked and is tried again next cycle."""
         try:
-            self.client._signed("DELETE", f"/portfolio/events/orders/{o.order_id}", params={"market_ticker": o.ticker})
+            self.client._signed(
+                "DELETE", f"/portfolio/events/orders/{o.order_id}", params={"market_ticker": o.ticker}, retry=True
+            )
         except HttpError as exc:
-            if exc.status != 404:  # already filled or gone
+            if exc.status != 404:  # 404: already filled or gone
                 self.errors.append(f"cancel {o.ticker}: {exc}")
+                return False
+        return True
 
     def sync(self, desired: list[Quote], books: dict[str, OrderBook], now: datetime) -> None:
         want = {(q.ticker, q.side): q for q in desired}
         for key in list(self.orders):
-            if key not in want or not _keep(self.orders[key], want[key]):
-                self._cancel(self.orders.pop(key))
+            if (key not in want or not _keep(self.orders[key], want[key])) and self._cancel(self.orders[key]):
+                del self.orders[key]
         for key, q in want.items():
             if key in self.orders:
-                continue
+                continue  # resting as wanted, or a cancel that failed: never a second order beside it
             body = self.order_body(q, f"{self.tag}-{uuid.uuid4().hex[:12]}")
             try:
                 resp = self.client.create_order(body)
@@ -411,7 +417,8 @@ class LiveVenue:
 
     def cancel_all(self) -> None:
         for key in list(self.orders):
-            self._cancel(self.orders.pop(key))
+            if self._cancel(self.orders[key]):
+                del self.orders[key]
 
     def cancel_stale(self) -> int:
         """Cancel resting orders a previous run left behind (client order ids start with this venue's tag)."""
