@@ -35,10 +35,11 @@ class Flows:
     settlements: float = 0.0  # paid out when markets settled
     deposits: float = 0.0
     withdrawals: float = 0.0
+    netted: float = 0.0  # YES+NO pairs bought in one market inside the window: Kalshi pays $1 back for each at once
     events: list[datetime] = field(default_factory=list)  # when each of these happened
 
     def explained(self) -> float:
-        return self.settlements + self.deposits - self.withdrawals - self.fills - self.fees
+        return self.settlements + self.deposits - self.withdrawals - self.fills - self.fees + self.netted
 
 
 def _ts(v: Any) -> datetime | None:
@@ -79,15 +80,23 @@ def take_snapshot(client: Any, now: datetime) -> Snapshot:
 def account_flows(client: Any, start: datetime, end: datetime) -> Flows:
     f = Flows()
     window = {"min_ts": int(start.timestamp()), "max_ts": int(end.timestamp()) + 1}
+    bought: dict[str, dict[str, float]] = {}
     for x in _pages(client, "/portfolio/fills", "fills", {**window, "limit": 200}):
         ts = _ts(x.get("created_time") or x.get("ts"))
         if ts is None or not start < ts <= end:
             continue
-        price = x.get("yes_price_dollars") if x.get("outcome_side") == "yes" else x.get("no_price_dollars")
-        cost = float(price or 0) * float(x.get("count_fp") or 0)
+        side = x.get("outcome_side")
+        price = x.get("yes_price_dollars") if side == "yes" else x.get("no_price_dollars")
+        qty = float(x.get("count_fp") or 0)
+        cost = float(price or 0) * qty
         f.fills += -cost if x.get("action") == "sell" else cost
         f.fees += float(x.get("fee_cost") or 0)
+        if side in ("yes", "no") and x.get("action") != "sell":
+            sides = bought.setdefault(x.get("ticker", ""), {"yes": 0.0, "no": 0.0})
+            sides[side] += qty
         f.events.append(ts)
+    # positions held before the window are not known here; OMEN never quotes the side opposite one it holds
+    f.netted = sum(min(s["yes"], s["no"]) for s in bought.values())
     for x in _pages(client, "/portfolio/settlements", "settlements", {**window, "limit": 200}):
         ts = _ts(x.get("settled_time"))
         if ts is None or not start < ts <= end:
@@ -139,13 +148,34 @@ class Reconciliation:
     holds_in_balance: bool | None
     votes: int
     credits: dict[bool, float]  # by convention: True = balance includes resting-order cash
+    cutoff: datetime | None = None  # Kalshi's archive cutoff for fills and settlements, if it could be read
 
     @property
     def paid(self) -> float | None:
-        return None if self.holds_in_balance is None else self.credits[self.holds_in_balance]
+        if self.holds_in_balance is not None:
+            return self.credits[self.holds_in_balance]
+        if abs(self.credits[True] - self.credits[False]) <= TOLERANCE:  # resting-order cash unchanged: either way
+            return self.credits[True]
+        return None
+
+
+def live_since(client: Any) -> datetime | None:
+    """The latest of Kalshi's archive cutoffs for fills and settlements: before it, records leave the live endpoints."""
+    try:
+        data = client.http.get_json("/historical/cutoff")
+    except Exception:  # unknown cutoff: reconcile the whole window (the output says so)
+        return None
+    stamps = [_ts(data.get(k)) for k in ("trades_created_ts", "market_settled_ts")]
+    known = [t for t in stamps if t is not None]
+    return max(known) if known else None
 
 
 def reconcile(client: Any, snaps: list[Snapshot]) -> Reconciliation:
+    cutoff = live_since(client)
+    if cutoff is not None:  # older fills and settlements are archived: start at the first snapshot after the cutoff
+        snaps = [s for s in snaps if s.ts >= cutoff] or snaps[-1:]
+    if len(snaps) < 2:
+        raise ValueError("no two cash snapshots after Kalshi's archive cutoff")
     a, b = snaps[0], snaps[-1]
     flows = account_flows(client, a.ts, b.ts)
     convention, votes = holds_in_balance(snaps, flows.events)
@@ -157,4 +187,5 @@ def reconcile(client: Any, snaps: list[Snapshot]) -> Reconciliation:
         convention,
         votes,
         {c: credits(a, b, flows, c) for c in (True, False)},
+        cutoff,
     )

@@ -137,3 +137,26 @@ def test_cash_snapshots_round_trip_through_the_ledger():
     ledger.lp_add_cash("paper", at(2), 1.0, 0.0)
     assert ledger.lp_cash("live") == [(T0, 100.0, 11.0), (at(1), 89.0, 11.0)]
     assert ledger.lp_cash("live", at(1)) == [(at(1), 89.0, 11.0)]
+
+
+def test_a_yes_and_a_no_bought_in_one_market_net_and_pay_a_dollar_back():
+    # Kalshi nets a YES and a NO into $1 at once: without counting that, it would read as a reward credit
+    acct = FakeAccount(0.0, fills=[fill(at(5), 100, 0.01, side="no"), fill(at(6), 100, 0.97, side="yes")])
+    f = account_flows(acct, T0, at(60))
+    assert f.fills == pytest.approx(98.0) and f.netted == pytest.approx(100.0)
+    a, b = Snapshot(T0, 100.0, 0.0), Snapshot(at(60), 102.0, 0.0)  # paid 98, got 100 back from netting
+    assert credits(a, b, f, True) == pytest.approx(0.0)
+
+
+def test_the_window_starts_after_kalshis_archive_cutoff():
+    class Http:
+        @staticmethod
+        def get_json(path):
+            assert path == "/historical/cutoff"
+            return {"trades_created_ts": at(30).isoformat(), "market_settled_ts": at(10).isoformat()}
+
+    acct = FakeAccount(0.0)
+    acct.http = Http()
+    snaps = [Snapshot(T0, 100.0, 0.0), Snapshot(at(40), 100.0, 0.0), Snapshot(at(1440), 112.0, 0.0)]
+    r = reconcile(acct, snaps)
+    assert r.start == at(40) and r.cutoff == at(30) and r.paid == pytest.approx(12.0)

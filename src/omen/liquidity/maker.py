@@ -11,7 +11,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Protocol
+from typing import Any, Protocol
 
 from omen.http import HttpError
 from omen.kalshi.client import KalshiClient
@@ -204,6 +204,8 @@ class Venue(Protocol):
     mode: str
     orders: dict[tuple[str, str], Resting]
 
+    def reconcile(self, now: datetime) -> int: ...
+
     def sync(self, desired: list[Quote], books: dict[str, OrderBook], now: datetime) -> None: ...
 
     def fills(self, trades: list[dict], now: datetime) -> list[Fill]: ...
@@ -240,9 +242,13 @@ def crosses(book: OrderBook, q: Quote) -> bool:
 
 
 def _keep(order: Resting | None, q: Quote) -> bool:
-    """Keep a resting order (and its queue place) while it is at the wanted price and at least half its wanted size
-    (and at least ``keep_min``)."""
-    return order is not None and abs(order.price - q.price) < 1e-9 and order.size >= max(1.0, q.size / 2, q.keep_min)
+    """Keep a resting order (and its queue place) while it is at the wanted price, at least half its wanted size (and
+    at least ``keep_min``), and not more than the wanted size, which the caps were checked against."""
+    return (
+        order is not None
+        and abs(order.price - q.price) < 1e-9
+        and max(1.0, q.size / 2, q.keep_min) <= order.size <= q.size * 1.05 + 1  # larger would exceed the caps
+    )
 
 
 def trade_fields(t: dict) -> tuple[datetime, str, float, str, float, str]:
@@ -263,6 +269,9 @@ class PaperVenue:
 
     def __init__(self) -> None:
         self.orders: dict[tuple[str, str], Resting] = {}
+
+    def reconcile(self, now: datetime) -> int:
+        return 0  # paper orders exist only here
 
     def sync(self, desired: list[Quote], books: dict[str, OrderBook], now: datetime) -> None:
         want = {(q.ticker, q.side): q for q in desired}
@@ -313,22 +322,32 @@ class PaperVenue:
         self.orders.clear()
 
 
-RECONCILE_GRACE = timedelta(seconds=30)
+RECONCILE_GRACE = timedelta(seconds=30)  # an order this new may not be listed yet: the API lags the exchange
+FILLS_LOOKBACK = timedelta(minutes=10)  # fills are re-read this far back, so an order adopted late still books them
+PENDING_TIMEOUT = timedelta(minutes=5)  # a create with an unknown outcome is looked for this long, then forgotten
 
 
 class LiveVenue:
-    """Real resting orders: post-only (never takes), good till canceled, canceled if trading pauses."""
+    """Real resting orders: post-only (never takes), good till canceled, canceled if trading pauses.
+
+    Kalshi is the source of truth. Every cycle ``reconcile`` re-reads the account's resting orders: it drops the ones
+    Kalshi cancelled on its own, refreshes remaining sizes, and adopts any of ours (client order id starting with
+    ``tag``) it does not track, such as a create whose response was lost or a previous run's order. Placed and adopted
+    order ids are kept in the ledger, so fills are attributed across restarts."""
 
     mode = "live"
 
-    def __init__(self, client: KalshiClient, tag: str = "omen-lp"):
+    def __init__(self, client: KalshiClient, tag: str = "omen-lp", ledger: Any = None):
         self.client = client
         self.tag = tag
+        self.ledger = ledger
         self.orders: dict[tuple[str, str], Resting] = {}
+        self.pending: dict[tuple[str, str], tuple[str, datetime]] = {}  # unknown-outcome creates: client id, sent
         self.errors: list[str] = []
-        self._fills_since: datetime | None = None
         self._seen_fills: set[str] = set()
-        self._ours: set[str] = set()  # every order id this venue placed: other fills on the account are not ours
+        # every order id this venue (or an earlier run) placed or adopted: other fills on the account are not ours
+        self._ours: set[str] = ledger.lp_order_ids(self.mode) if ledger is not None else set()
+        self._fills_since: datetime | None = ledger.lp_last_activity(self.mode) if ledger is not None else None
 
     @staticmethod
     def order_body(q: Quote, client_order_id: str) -> dict:
@@ -346,6 +365,22 @@ class LiveVenue:
             "cancel_order_on_pause": True,
         }
 
+    @staticmethod
+    def _row_side_price(row: dict) -> tuple[str, float]:
+        """(outcome side, price paid per contract on that side) of an Order row."""
+        side = row.get("outcome_side")
+        if side not in ("yes", "no"):
+            side = "yes" if row.get("book_side") == "bid" else "no"
+        price = row.get("yes_price_dollars") if side == "yes" else row.get("no_price_dollars")
+        return side, float(price or 0)
+
+    def _remember(self, order_id: str, client_order_id: str, ticker: str, side: str, price: float, now: datetime):
+        if not order_id:
+            return
+        self._ours.add(order_id)
+        if self.ledger is not None:
+            self.ledger.lp_add_order(self.mode, order_id, client_order_id, ticker, side, price, now)
+
     def _cancel(self, o: Resting) -> bool:
         """True once the order is gone. A cancel is safe to repeat, so it is retried on 429 (Basic tier: 100 write
         tokens a second, 10 per cancel); one that still fails stays tracked and is tried again next cycle."""
@@ -359,28 +394,34 @@ class LiveVenue:
                 return False
         return True
 
-    def reconcile(self, now: datetime) -> int:
-        """Drop orders Kalshi no longer has resting and refresh remaining sizes; returns how many were dropped.
-
-        Kalshi cancels orders on its own: at every trading pause (Thursdays 3-5 AM ET) for orders placed with
-        cancel_order_on_pause, when a paused market reactivates, after close, and below a raised settlement floor.
-        Orders younger than RECONCILE_GRACE are left alone: the API can lag the exchange by a moment."""
+    def _orders(self, params: dict) -> list[dict] | None:
         rows: list[dict] = []
         cursor = ""
         for _ in range(20):
-            params: dict = {"status": "resting", "limit": 200}
+            q = dict(params, limit=200)
             if cursor:
-                params["cursor"] = cursor
+                q["cursor"] = cursor
             try:
-                data = self.client._signed("GET", "/portfolio/orders", params=params)
+                data = self.client._signed("GET", "/portfolio/orders", params=q)
             except HttpError as exc:
-                self.errors.append(f"resting orders: {exc}")
-                return 0  # keep the local book as it is; try again next cycle
+                self.errors.append(f"orders: {exc}")
+                return None
             rows.extend(data.get("orders") or [])
             cursor = data.get("cursor") or ""
             if not cursor:
                 break
-        resting = {o.get("order_id"): o for o in rows}
+        return rows
+
+    def reconcile(self, now: datetime) -> int:
+        """Match the local book to Kalshi's resting orders; returns how many local orders were dropped.
+
+        Kalshi cancels orders on its own: at every trading pause (Thursdays 3-5 AM ET) for orders placed with
+        cancel_order_on_pause, when a paused market reactivates, after close, and below a raised settlement floor.
+        Orders younger than RECONCILE_GRACE are left alone: the API can lag the exchange by a moment."""
+        rows = self._orders({"status": "resting"})
+        if rows is None:
+            return 0  # keep the local book as it is; try again next cycle
+        resting = {r.get("order_id"): r for r in rows}
         dropped = 0
         for key, o in list(self.orders.items()):
             live = resting.get(o.order_id)
@@ -390,48 +431,78 @@ class LiveVenue:
             elif now - o.placed >= RECONCILE_GRACE:
                 del self.orders[key]
                 dropped += 1
+        tracked = {o.order_id for o in self.orders.values()}
+        for oid, row in resting.items():
+            cid = str(row.get("client_order_id") or "")
+            if not oid or oid in tracked or not cid.startswith(self.tag):
+                continue
+            # ours but untracked: a create whose response was lost, or an order an earlier run left behind
+            side, price = self._row_side_price(row)
+            key = (row.get("ticker", ""), side)
+            self._remember(oid, cid, key[0], side, price, now)
+            self.pending.pop(key, None)
+            o = Resting(key[0], side, price, float(row.get("remaining_count_fp") or 0), 0.0, oid, now - RECONCILE_GRACE)
+            if key in self.orders:  # a second order on one side: cancel the stray (retried next cycle if it fails)
+                self._cancel(o)
+            else:
+                self.orders[key] = o
+                tracked.add(oid)
+        for key, (cid, sent) in list(self.pending.items()):  # never listed as resting: find it in any status
+            if self._found(key[0], cid, now) or now - sent >= PENDING_TIMEOUT:
+                del self.pending[key]
         return dropped
 
+    def _found(self, ticker: str, client_order_id: str, now: datetime) -> bool:
+        """Record the order id of an unknown-outcome create that filled or was cancelled before it was seen resting."""
+        for row in self._orders({"ticker": ticker}) or []:
+            if row.get("client_order_id") == client_order_id:
+                side, price = self._row_side_price(row)
+                self._remember(row.get("order_id", ""), client_order_id, ticker, side, price, now)
+                return True
+        return False
+
     def sync(self, desired: list[Quote], books: dict[str, OrderBook], now: datetime) -> None:
-        self.reconcile(now)
         want = {(q.ticker, q.side): q for q in desired}
         for key in list(self.orders):
             if (key not in want or not _keep(self.orders[key], want[key])) and self._cancel(self.orders[key]):
                 del self.orders[key]
         for key, q in want.items():
-            if key in self.orders:
-                continue  # resting as wanted, or a cancel that failed: never a second order beside it
-            body = self.order_body(q, f"{self.tag}-{uuid.uuid4().hex[:12]}")
+            if key in self.orders or key in self.pending:
+                continue  # resting as wanted, a cancel that failed, or a create whose outcome is not known yet
+            cid = f"{self.tag}-{uuid.uuid4().hex[:12]}"
             try:
-                resp = self.client.create_order(body)
-            except HttpError as exc:  # e.g. post-only rejected because the book moved: try again next cycle
+                resp = self.client.create_order(self.order_body(q, cid))
+            except HttpError as exc:
                 self.errors.append(f"place {q.ticker} {q.side}@{q.price}: {exc}")
-                continue
-            self._ours.add(resp.get("order_id", ""))
+                if exc.status is None or exc.status >= 500:  # timeout, reset or 5xx: Kalshi may have taken it
+                    self.pending[key] = (cid, now)
+                continue  # a 4xx (post-only cross, 429, bad request) placed nothing: try again next cycle
+            oid = resp.get("order_id", "")
+            self._remember(oid, cid, q.ticker, q.side, q.price, now)
             remaining = float(resp.get("remaining_count") or 0)
             if remaining > 0:
-                self.orders[key] = Resting(q.ticker, q.side, q.price, remaining, 0.0, resp.get("order_id", ""), now)
+                self.orders[key] = Resting(q.ticker, q.side, q.price, remaining, 0.0, oid, now)
 
     def fills(self, trades: list[dict], now: datetime) -> list[Fill]:
-        """Our own fills from ``/portfolio/fills`` (the public tape is not needed live)."""
-        since = self._fills_since or now
+        """Our own fills from ``/portfolio/fills`` (the public tape is not needed live). Sizes are not touched here:
+        ``reconcile`` reads them from Kalshi, so a fill is never subtracted twice."""
+        since = (self._fills_since or now) - FILLS_LOOKBACK
         out: list[Fill] = []
         rows: list[dict] = []
         cursor = ""
-        for _ in range(10):
-            params: dict = {"min_ts": int(since.timestamp()) - 5, "limit": 200}
+        for _ in range(20):
+            params: dict = {"min_ts": int(since.timestamp()), "limit": 200}
             if cursor:
                 params["cursor"] = cursor
             try:
                 data = self.client._signed("GET", "/portfolio/fills", params=params)
             except HttpError as exc:
                 self.errors.append(f"fills: {exc}")
-                return out
+                return out  # _fills_since stays: the next poll covers this window again
             rows.extend(data.get("fills") or [])
             cursor = data.get("cursor") or ""
             if not cursor:
                 break
-        ids = {o.order_id for o in self.orders.values()}
         for f in rows:
             fid = f.get("fill_id") or f.get("trade_id")
             if not fid or fid in self._seen_fills or f.get("order_id") not in self._ours:
@@ -439,38 +510,52 @@ class LiveVenue:
             self._seen_fills.add(fid)
             side = f.get("outcome_side") or ("yes" if f.get("book_side") == "bid" else "no")
             price = float(f["yes_price_dollars"] if side == "yes" else f["no_price_dollars"])
-            qty = float(f["count_fp"])
             ts = datetime.fromisoformat(f["created_time"].replace("Z", "+00:00")) if f.get("created_time") else now
             out.append(
-                Fill(ts, f["ticker"], side, price, qty, float(f.get("fee_cost") or 0), f.get("order_id", ""), fid)
+                Fill(
+                    ts,
+                    f["ticker"],
+                    side,
+                    price,
+                    float(f["count_fp"]),
+                    float(f.get("fee_cost") or 0),
+                    f.get("order_id", ""),
+                    fid,
+                )
             )
-            o = self.orders.get((f["ticker"], side))
-            if o is not None and f.get("order_id") in ids:
-                o.size -= qty
-                if o.size <= 1e-9:
-                    del self.orders[(f["ticker"], side)]
         self._fills_since = now
         return out
 
     def cancel_all(self) -> None:
+        """Cancel every order we track, then every order of ours still resting on Kalshi (untracked ones included);
+        whatever could not be cancelled stays in ``orders`` for the next attempt."""
         for key in list(self.orders):
             if self._cancel(self.orders[key]):
                 del self.orders[key]
+        self.cancel_stale()
 
     def cancel_stale(self) -> int:
-        """Cancel resting orders a previous run left behind (client order ids start with this venue's tag)."""
+        """Cancel resting orders whose client order id starts with this venue's tag (a previous run's, or ones this
+        run lost track of); returns how many were cancelled. Failures are adopted, so they are retried and their fills
+        are booked. Never raises: an API outage at start-up must not stop the service."""
+        rows = self._orders({"status": "resting"})
+        if rows is None:
+            return 0
         n = 0
-        cursor = ""
-        for _ in range(20):
-            params: dict = {"status": "resting", "limit": 200}
-            if cursor:
-                params["cursor"] = cursor
-            data = self.client._signed("GET", "/portfolio/orders", params=params)
-            for o in data.get("orders") or []:
-                if str(o.get("client_order_id") or "").startswith(self.tag):
-                    self._cancel(Resting(o["ticker"], "", 0.0, 0.0, order_id=o["order_id"]))
-                    n += 1
-            cursor = data.get("cursor") or ""
-            if not cursor:
-                return n
+        now = datetime.now(UTC)
+        for row in rows:
+            cid = str(row.get("client_order_id") or "")
+            oid = row.get("order_id", "")
+            if not oid or not cid.startswith(self.tag):
+                continue
+            side, price = self._row_side_price(row)
+            ticker = row.get("ticker", "")
+            self._remember(oid, cid, ticker, side, price, now)
+            o = Resting(ticker, side, price, float(row.get("remaining_count_fp") or 0), 0.0, oid, now)
+            if self._cancel(o):
+                n += 1
+                if self.orders.get((ticker, side)) is not None and self.orders[(ticker, side)].order_id == oid:
+                    del self.orders[(ticker, side)]
+            else:
+                self.orders.setdefault((ticker, side), o)
         return n
