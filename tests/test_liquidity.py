@@ -1374,3 +1374,38 @@ def test_a_market_whose_trade_history_is_cut_off_is_not_seeded_or_quoted(tmp_pat
     svc, _ = service(tmp_path, fake)
     svc.step()
     assert not svc.flow.seeded("KXRT-FILM-90") and svc.step()["dead_quotes"] == 0
+
+
+def test_the_fill_guard_stops_live_quoting_when_fills_outrun_the_rewards(tmp_path):
+    fake = FakeKalshi()
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+    svc, ledger = live_service(tmp_path, fake)
+    sent: list[str] = []
+    svc._say = lambda title, body, severity: sent.append(title)
+    ledger.lp_record_fill("live", Fill(T0 - timedelta(hours=2), "KXRT-FILM-90", "no", 0.01, 900, 0.0, "x", "t1"))
+    ledger.lp_add_reward("live", T0 - timedelta(hours=2), "KXRT-FILM-90", 5.0, 3600)  # $9 of fills vs $5 of reward
+    svc.step()
+    assert svc.kill_file().exists() and "fill guard" in svc.kill_file().read_text()
+    assert svc.venue.client.created == [] and "Liquidity quoting stopped (fill guard)" in sent
+
+
+def test_the_fill_guard_lets_fills_within_the_replays_range_or_too_small_to_judge_pass(tmp_path):
+    for fills, reward in ((900, 40.0), (300, 0.0)):  # $9 against $40 of reward; $3 is below the $5 minimum
+        fake = FakeKalshi()
+        fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+        path = tmp_path / f"{fills}"
+        path.mkdir()
+        svc, ledger = live_service(path, fake)
+        ledger.lp_record_fill("live", Fill(T0 - timedelta(hours=2), "KXRT-FILM-90", "no", 0.01, fills, 0.0, "x", "t1"))
+        if reward:
+            ledger.lp_add_reward("live", T0 - timedelta(hours=2), "KXRT-FILM-90", reward, 3600)
+        svc.step()
+        assert not svc.kill_file().exists()
+
+
+def test_the_fill_guard_is_live_only(tmp_path):
+    fake = FakeKalshi()
+    svc, ledger = service(tmp_path, fake)
+    ledger.lp_record_fill("paper", Fill(T0 - timedelta(hours=2), "KXRT-FILM-90", "no", 0.01, 900, 0.0, "x", "t1"))
+    svc.step()
+    assert not svc.kill_file().exists()

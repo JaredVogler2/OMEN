@@ -196,6 +196,13 @@ class LiquiditySettings:
     dead_side_stop_before_close_minutes: int = 360
     exchange_indexes: list[int] = field(default_factory=lambda: [0])  # funded exchange shards to quote on
     summary_every_hours: int = 6
+    # live: stop quoting (write the kill file) once fills over the trailing fill_guard_hours cost more than
+    # fill_guard_ratio x the rewards estimated for the same hours. The replays had fills at about a third of the
+    # rewards; an independent live run of 1c dead-side bids (Oct 2026) found fills above the rewards, because the public
+    # tape cannot show sales into a bid that was not there. 0 turns the guard off.
+    fill_guard_ratio: float = 0.6
+    fill_guard_min_usd: float = 5.0  # judge only once fills have cost at least this much
+    fill_guard_hours: int = 72
 
 
 @dataclass

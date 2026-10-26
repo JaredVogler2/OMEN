@@ -116,6 +116,7 @@ class LiquidityService:
     def step(self) -> dict:
         now = self.clock()
         stats: dict = {"time": now.isoformat(timespec="seconds"), "mode": self.mode}
+        self._fill_guard(now)  # may write the kill file: everything below then cancels and places nothing
         if self.kill_file().exists():
             self._accrue(now, {})
             clean = self.venue.cancel_all(now)  # every killed cycle: tracked orders, then any of ours on Kalshi
@@ -467,6 +468,31 @@ class LiquidityService:
         if new:
             self._report_fills(new)
         return new
+
+    def _fill_guard(self, now: datetime) -> None:
+        """Live: stop for good (the kill file) when real fills cost more than ``fill_guard_ratio`` of the estimated
+        rewards over the trailing window. The fill model behind every replay reads sales off the public tape, which
+        cannot show what a bid nobody else posted would face; fills that run well above the replays mean that model
+        is wrong for this account, and the reward does not pay for them."""
+        if self.mode != "live" or self.cfg.fill_guard_ratio <= 0 or self.kill_file().exists():
+            return
+        s = self.ledger.lp_summary(self.mode, now - timedelta(hours=self.cfg.fill_guard_hours))
+        cost = s["notional"] + s["fees"]
+        if cost < self.cfg.fill_guard_min_usd or cost <= self.cfg.fill_guard_ratio * s["reward_usd"]:
+            return
+        reason = (
+            f"fills cost ${cost:.2f} in the last {self.cfg.fill_guard_hours} h against ${s['reward_usd']:.2f} of "
+            f"estimated rewards (limit {self.cfg.fill_guard_ratio:.0%})"
+        )
+        self.kill_file().parent.mkdir(parents=True, exist_ok=True)
+        self.kill_file().write_text(f"fill guard {now.isoformat(timespec='seconds')}: {reason}\n")
+        log.error("fill guard: %s", reason)
+        self._say(
+            "Liquidity quoting stopped (fill guard)",
+            f"{reason}. The replays had fills at about a third of the rewards, so this is outside what they "
+            f"support. Every order is canceled and nothing new is placed until {self.kill_file()} is removed.",
+            "warning",
+        )
 
     def _watch_reads(self, now: datetime) -> None:
         """Live: warn once when Kalshi's orders or our fills have been unreadable for UNREADY_WARN, and say when they

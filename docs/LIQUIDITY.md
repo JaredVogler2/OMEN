@@ -246,6 +246,42 @@ point) minute by minute.
 It is one week, and the rewards are the filed formula's, not Kalshi's payouts. Treat it as what a live trial should
 roughly reproduce, not as a forecast.
 
+**Independent live evidence: read this before any live run.** A public case study
+([mirabilis-agent/lip-ledger](https://github.com/mirabilis-agent/lip-ledger), `docs/POSTMORTEM.md`) ran a $20 account
+on Kalshi from Oct 2 to Oct 10, 2026, mostly in hourly temperature programs, which OMEN excludes. It included 1c bids
+on the empty side of decided markets, the play above.
+
+* **Rewards:** Kalshi paid within 1–3% of the filed formula on all four programs that reached $1 ($20.30 received).
+* **Fills:** they cost more than the rewards: $36.06 of trading losses over the same days. Over nine fill-heavy hours,
+  rewards were about $12.3 against $15.5 of fills.
+* **Sweeps:** fast traders swept 1c bids in clips of 200–600 contracts. Ten-second bursts reached about 1,400
+  contracts at the 90th percentile and about 6,000 at the 99th.
+* **Follower bot:** one joined at the same price within about 17 seconds of a side starting to count, and pulled out
+  at the first hit. The first bid took the sweeps and kept 25–50% of the reward.
+* **Tape models:** fill models built from the tape underestimated fills on bids placed in empty sides by 10–30x.
+
+Two of those mechanisms bias every replay and paper run here in the same direction:
+
+* **Fills.** The flow filter and the paper fills read sales off the public tape, which only shows sales into bids that
+  existed. A seller who would have dumped thousands of contracts into our bid is invisible.
+* **Reward share.** A paper order is never on Kalshi's book, so no follower reacts to it. The 65.6% share measured on
+  Oct 25 comes from that. A live order may keep less.
+
+How much fill underestimation each replay can absorb before its net reaches zero:
+
+| Replay (flat $100 a week, $1 minimum) | Reward | Fills | Fills could be this much larger |
+|---|---|---|---|
+| Aug–Sep, 67% share | $1,768 | $408 | 4.6x |
+| Oct 1–22, 67% | $1,339 | $433 | 3.2x |
+| Oct 1–22, 50% | $922 | $352 | 2.6x |
+| Oct 23–25, 67% | $156 | $52 | 3.0x |
+
+The live case study measured more than that. So treat the dead-side play as unproven until fills are measured on
+this account's own orders. Live mode therefore has a **fill guard** (`fill_guard_ratio`, on by default). Once fills
+over the trailing 72 hours cost more than 60% of the rewards estimated for those hours, after at least $5 of fills, it
+writes the kill file: every order is canceled and nothing is placed until the file is removed. The replays ran at
+23–33%, so tripping it means the fill model does not hold for this account.
+
 **How to read these numbers:**
 
 * **Fills, worst case:** our bid absorbs every sale.
