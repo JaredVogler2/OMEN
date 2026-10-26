@@ -433,10 +433,17 @@ class Ledger:
         )
         return int(cur.lastrowid or 0)
 
-    def pending_outbox(self, max_attempts: int = 8) -> list[sqlite3.Row]:
-        return list(
-            self.db.execute("SELECT * FROM outbox WHERE sent_at IS NULL AND attempts < ? ORDER BY id", (max_attempts,))
+    def pending_outbox(
+        self, max_attempts: int = 8, purposes: set[str] | None = None, exclude: set[str] | None = None
+    ) -> list[sqlite3.Row]:
+        rows = self.db.execute(
+            "SELECT * FROM outbox WHERE sent_at IS NULL AND attempts < ? ORDER BY id", (max_attempts,)
         )
+        return [
+            r
+            for r in rows
+            if (purposes is None or r["purpose"] in purposes) and (exclude is None or r["purpose"] not in exclude)
+        ]
 
     def outbox_sent(self, oid: int, message_id: str | None, now: datetime) -> None:
         self.db.execute(

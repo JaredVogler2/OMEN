@@ -32,9 +32,13 @@ from omen.liquidity.scoring import snapshot
 
 log = logging.getLogger(__name__)
 REFRESH = timedelta(minutes=5)
-MAX_TAPE_PAGES = 30
+MAX_TAPE_PAGES = 60  # 1,000 trades a page; a normal minute is 15-24 pages exchange-wide
 MAX_BACKFILLS = 10  # markets whose 1c selling history is fetched per cycle (a few requests each)
 MIN_PAYOUT_USD = 1.0  # Kalshi pays a program's period reward to an account only if it comes to at least $1.00
+PROGRAM_END_MARGIN = timedelta(minutes=10)  # stop quoting a program this long before it ends
+UNREADY_WARN = timedelta(minutes=5)  # live: say so once Kalshi's orders or our fills have been unreadable this long
+REFRESH_FAILURES_WARN = 3  # say so once the reward program list has failed this many refreshes in a row
+FLUSH_BUDGET_SECONDS = 10.0  # Discord delivery per cycle; the rest waits for the next cycle
 
 
 def policy_from(settings: Settings) -> QuotePolicy:
@@ -88,12 +92,16 @@ class LiquidityService:
         self._last: datetime | None = None
         self._rates: dict[str, float] = {}
         self._tape_since: datetime | None = None
+        self._tape_complete = True
+        self._refresh_failures = 0
         self.flow = DeadSideFlow()
         self._flow_at: datetime | None = None
         self._flow_minutes = 0.0
         self._seen_shapes: set[tuple[str, ...]] = set()
         self._sold: dict[str, float] = {}  # contracts the tape showed sold into 1c dead-side bids this interval
         self._killed = False
+        self._unready_since: datetime | None = None
+        self._unready_warned = False
         self._last_summary: datetime | None = None
         self.last_error: str | None = None
 
@@ -110,7 +118,7 @@ class LiquidityService:
         stats: dict = {"time": now.isoformat(timespec="seconds"), "mode": self.mode}
         if self.kill_file().exists():
             self._accrue(now, {})
-            clean = self.venue.cancel_all()  # every killed cycle: tracked orders, then any of ours on Kalshi
+            clean = self.venue.cancel_all(now)  # every killed cycle: tracked orders, then any of ours on Kalshi
             if not self._killed:
                 self._killed = True
                 self._say(
@@ -145,13 +153,19 @@ class LiquidityService:
             new = self._book_fills(self.venue.fills(tape, now) + self._imputed_dead_fills(now))
         # the interval just ended earned the average of its start rate and its end rate: the end rate prices our
         # orders where they actually rested in the new book (a best bid that moved past us, or a fill, cuts it)
-        self._accrue(now, self._current_rates())
+        self._accrue(now, self._current_rates(now))
         held = self.ledger.lp_positions(self.mode)
         desired = self._desired(now, held)
-        if self.mode != "live" or (self.venue.ready and self._trading_active()):
-            # live: never act on a book or ledger this cycle could not read; during a pause Kalshi rejects orders
+        if self.mode != "live":
             self.venue.sync(desired, self.books, now)
-        self._rates = self._current_rates()
+        else:
+            self._watch_reads(now)
+            if self._trading_active():  # during a pause Kalshi rejects orders
+                # create only from a book and ledger this cycle could read; cancels need neither, so they always run.
+                # Orders are stamped with the time they are sent, not the cycle's start: a slow cycle must not make
+                # a new order look old enough to drop if Kalshi's listing lags
+                self.venue.sync(desired, self.books, self.clock(), place=self.venue.ready)
+        self._rates = self._current_rates(now)
         if self.mode == "live":
             self._record_cash(now)
         settled = self._settle(now, held)
@@ -179,7 +193,16 @@ class LiquidityService:
         except HttpError as exc:
             self.last_error = f"incentive programs: {exc}"
             log.warning(self.last_error)
+            self._refresh_failures += 1
+            if self._refresh_failures == REFRESH_FAILURES_WARN:
+                self._say(
+                    "Reward programs unreadable",
+                    f"Kalshi's incentive program list failed {REFRESH_FAILURES_WARN} refreshes in a row ({exc}). "
+                    "Quotes stop as each known program nears its end; nothing new is added until the list reads.",
+                    "warning",
+                )
             return
+        self._refresh_failures = 0
         if unreadable:
             self._warn_unreadable(unreadable)
         self.programs = eligible(
@@ -188,7 +211,7 @@ class LiquidityService:
             min_hours=self.cfg.min_program_hours,
             min_reward_per_day=self.cfg.min_reward_per_day_usd,
             exclude=self.cfg.exclude_series,
-            min_time_left=timedelta(minutes=10),
+            min_time_left=PROGRAM_END_MARGIN,
             limit=self.cfg.max_markets,
         )
         self.dead_programs = (
@@ -198,12 +221,13 @@ class LiquidityService:
                 min_hours=self.cfg.min_program_hours,
                 min_reward_per_day=self.cfg.min_reward_per_day_usd,
                 exclude=self.cfg.dead_side_exclude_series,
-                min_time_left=timedelta(minutes=10),
+                min_time_left=PROGRAM_END_MARGIN,
                 limit=10 * self.cfg.max_markets,
             )
             if self.cfg.complete_dead_sides
             else []
         )
+        self.flow.forget({p.ticker for p in self.dead_programs})  # markets whose programs left the list
         held = set(self.ledger.lp_positions(self.mode))
         tickers = sorted({p.ticker for p in self.programs} | {p.ticker for p in self.dead_programs} | held)
         self.markets = {m.ticker: m for m in self.client.markets_by_ticker(tickers)} if tickers else {}
@@ -215,6 +239,7 @@ class LiquidityService:
         ours = {o.ticker for o in self.venue.orders.values()} | {p.ticker for p in self.dead_programs}
         out: list[dict] = []
         cursor = ""
+        self._tape_complete = False
         for _ in range(MAX_TAPE_PAGES):
             params: dict = {"min_ts": int(since.timestamp()), "limit": 1000}
             if cursor:
@@ -227,7 +252,10 @@ class LiquidityService:
             out.extend(t for t in data.get("trades") or [] if t.get("ticker") in ours)
             cursor = data.get("cursor") or ""
             if not cursor:
+                self._tape_complete = True
                 break
+        if not self._tape_complete:  # newest trades come first: the start of the interval is missing
+            log.warning("trade tape incomplete since %s: 1c selling flow not measured this interval", since)
         self._tape_since = now
         return out
 
@@ -249,6 +277,8 @@ class LiquidityService:
             dead = sides[0]
             sold = sum(dead_side_sales(t, dead) for t in by_ticker.get(p.ticker, []))
             self._sold[p.ticker] = sold
+            if not self._tape_complete:
+                continue  # sales missing from the tape would read as a safe market: this interval is not measured
             dead_levels = levels(book, dead)
             ours = self.venue.orders.get((p.ticker, dead))
             # a sale proves a 1c bid rested during the interval even if it was used up by the end; live, our own
@@ -313,6 +343,8 @@ class LiquidityService:
         best: dict[tuple[str, str], tuple[float, Quote]] = {}
 
         def usable(p: Program, stop_minutes: int) -> OrderBook | None:
+            if p.end - now < PROGRAM_END_MARGIN:
+                return None  # also when the program list could not be refreshed: an ended program pays nothing
             m = self.markets.get(p.ticker)
             book = self.books.get(p.ticker)
             if m is None or book is None or not m.tradable:
@@ -401,12 +433,12 @@ class LiquidityService:
             out.append(q)
         return out
 
-    def _current_rates(self) -> dict[str, float]:
+    def _current_rates(self, now: datetime) -> dict[str, float]:
         rates: dict[str, float] = {}
         by_ticker: dict[str, dict[str, tuple[float, float]]] = {}
         for o in self.venue.orders.values():
             by_ticker.setdefault(o.ticker, {})[o.side] = (o.price, o.size)
-        programs = {p.ticker: p for p in [*self.dead_programs, *self.programs]}
+        programs = {p.ticker: p for p in [*self.dead_programs, *self.programs] if p.live(now)}
         for ticker, ours in by_ticker.items():
             p, book = programs.get(ticker), self.books.get(ticker)
             if p is not None and book is not None:
@@ -416,10 +448,14 @@ class LiquidityService:
     def _accrue(self, now: datetime, end_rates: dict[str, float]) -> None:
         if self._last is not None and self._rates:
             seconds = min((now - self._last).total_seconds(), 3 * self.cfg.cycle_seconds)
+            began = now - timedelta(seconds=seconds)
+            ends = {p.ticker: p.end for p in [*self.dead_programs, *self.programs]}
             for ticker, start in self._rates.items():
+                # a program that ended during the interval paid only until its end
+                live = min(seconds, max(0.0, (ends[ticker] - began).total_seconds())) if ticker in ends else seconds
                 rate = (start + end_rates.get(ticker, 0.0)) / 2
-                if rate > 0:
-                    self.ledger.lp_add_reward(self.mode, now, ticker, rate * seconds, seconds)
+                if rate > 0 and live > 0:
+                    self.ledger.lp_add_reward(self.mode, now, ticker, rate * live, live)
         self._last = now
 
     def _book_fills(self, fills: list[Fill]) -> list[Fill]:
@@ -427,6 +463,25 @@ class LiquidityService:
         if new:
             self._report_fills(new)
         return new
+
+    def _watch_reads(self, now: datetime) -> None:
+        """Live: warn once when Kalshi's orders or our fills have been unreadable for UNREADY_WARN, and say when they
+        read again."""
+        if self.venue.ready:
+            if self._unready_warned:
+                self._say("Live reads recovered", "Kalshi's orders and our fills read again; quoting resumed.", "info")
+            self._unready_since, self._unready_warned = None, False
+            return
+        self._unready_since = self._unready_since or now
+        if not self._unready_warned and now - self._unready_since >= UNREADY_WARN:
+            self._unready_warned = True
+            errors = "; ".join(getattr(self.venue, "errors", [])[-3:]) or "none recorded"
+            self._say(
+                "Live reads failing",
+                f"Kalshi's resting orders or our fills could not be read for {UNREADY_WARN.seconds // 60} minutes. "
+                f"Nothing new is placed; orders no longer wanted are still canceled. Last errors: {errors}",
+                "warning",
+            )
 
     def _trading_active(self) -> bool:
         try:
@@ -547,20 +602,22 @@ class LiquidityService:
                 except HttpError as exc:
                     self.last_error = str(exc)
                     log.warning("lp cycle failed: %s", exc)
-                try:
-                    self.notifier.flush(self.clock())
+                try:  # only this service's messages, and never for long: cancels wait on the next step
+                    self.notifier.flush(self.clock(), purposes={"lp"}, budget_seconds=FLUSH_BUDGET_SECONDS)
                 except Exception:
                     log.exception("discord flush failed")
                 n += 1
                 if cycles is None or n < cycles:
                     sleep(max(0.0, self.cfg.cycle_seconds - (time.monotonic() - started)))
         finally:
-            if not self.venue.cancel_all() and self.mode == "live":
+            if not self.venue.cancel_all(self.clock()) and self.mode == "live":
                 sleep(2.0)  # a create cut short by the stop may be listed a moment late: sweep once more
-                self.venue.cancel_all()
+                self.venue.cancel_all(self.clock())
             try:  # fills since the last poll would otherwise be lost with this process
                 self._book_fills(self.venue.fills([], self.clock()))
             except Exception:  # shutting down: the next start re-reads fills from the ledger's last time
                 log.exception("final fills poll failed")
             if self.venue.orders:  # still resting on Kalshi: the next start cancels them (cancel_stale)
                 log.error("%d order(s) could not be canceled on exit", len(self.venue.orders))
+            if getattr(self.venue, "pending", None):  # kept in the ledger: the next start looks them up
+                log.error("%d create(s) of unknown outcome on exit", len(self.venue.pending))

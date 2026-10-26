@@ -43,9 +43,11 @@ def _client(s: Settings) -> KalshiClient:
     return KalshiClient(http)
 
 
-def _notifier(s: Settings, ledger: Ledger, dry_run: bool = False) -> Notifier:
+def _notifier(
+    s: Settings, ledger: Ledger, dry_run: bool = False, timeout: float = 20.0, max_wait: float = 30.0
+) -> Notifier:
     routes = build_routes(s.discord_webhooks, s.discord_bot_token, s.discord_channel_map)
-    transport = DiscordTransport(s.discord_bot_token) if routes else None
+    transport = DiscordTransport(s.discord_bot_token, timeout=timeout, max_wait=max_wait) if routes else None
     return Notifier(ledger, routes, transport, dry_run=dry_run)
 
 
@@ -400,7 +402,8 @@ def build_lp(s: Settings):
         venue = LiveVenue(client, ledger=ledger)  # the ledger keeps our order ids, so fills survive restarts
     else:
         venue = PaperVenue()
-    return LiquidityService(s, _client(s), ledger, _notifier(s, ledger), venue), ledger
+    # short Discord waits: delivery runs between quoting cycles, and a slow Discord must not hold up cancels
+    return LiquidityService(s, _client(s), ledger, _notifier(s, ledger, timeout=5.0, max_wait=2.0), venue), ledger
 
 
 def _lp_reconcile(s: Settings, args: argparse.Namespace) -> int:

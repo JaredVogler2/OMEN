@@ -264,7 +264,7 @@ class Runner:
 
     def flush(self) -> None:
         if self.notifier.configured:
-            self.notifier.flush(self.clock())
+            self.notifier.flush(self.clock(), exclude={"lp"})  # omen-lp delivers its own (no double sends)
 
     def publish(self) -> None:
         """Push the live feed to the website (if configured). Best-effort: never interrupts scanning."""
