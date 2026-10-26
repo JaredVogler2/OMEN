@@ -71,6 +71,9 @@ CREATE TABLE IF NOT EXISTS lp_cash (
 CREATE TABLE IF NOT EXISTS lp_pending (
   mode TEXT NOT NULL, ticker TEXT NOT NULL, side TEXT NOT NULL, client_order_id TEXT NOT NULL, sent TEXT NOT NULL,
   PRIMARY KEY(mode, ticker, side));
+CREATE TABLE IF NOT EXISTS lp_programs (
+  mode TEXT NOT NULL, ticker TEXT NOT NULL, start TEXT NOT NULL, end TEXT NOT NULL, reward_usd REAL NOT NULL,
+  PRIMARY KEY(mode, ticker, start));
 CREATE TABLE IF NOT EXISTS lp_orders (
   mode TEXT NOT NULL, order_id TEXT NOT NULL, client_order_id TEXT, ticker TEXT NOT NULL, side TEXT NOT NULL,
   price REAL NOT NULL, placed TEXT NOT NULL, PRIMARY KEY(mode, order_id));
@@ -602,6 +605,42 @@ class Ledger:
             (mode, start.astimezone(UTC).strftime("%Y-%m-%dT%H:00"), end.astimezone(UTC).strftime("%Y-%m-%dT%H:00")),
         ).fetchone()
         return float(row["usd"])
+
+    def lp_record_programs(self, mode: str, programs: Iterable[Any]) -> None:
+        """Remember each reward period quoted (Kalshi pays per period, a day after it ends)."""
+        self.db.executemany(
+            "INSERT OR IGNORE INTO lp_programs(mode,ticker,start,end,reward_usd) VALUES(?,?,?,?,?)",
+            [(mode, p.ticker, iso(p.start), iso(p.end), p.reward_usd) for p in programs],
+        )
+
+    def lp_programs_ended(self, mode: str, after: datetime, until: datetime) -> list[tuple[str, datetime, datetime]]:
+        """Reward periods that ended in (after, until]: (ticker, start, end)."""
+        rows = self.db.execute(
+            "SELECT ticker, start, end FROM lp_programs WHERE mode=? AND end > ? AND end <= ? ORDER BY end",
+            (mode, iso(after), iso(until)),
+        )
+        return [(r["ticker"], datetime.fromisoformat(r["start"]), datetime.fromisoformat(r["end"])) for r in rows]
+
+    def lp_reward_in_period(self, mode: str, ticker: str, start: datetime, end: datetime) -> float:
+        """OMEN's estimate for one ticker over one reward period (hourly buckets, both ends included)."""
+        row = self.db.execute(
+            "SELECT COALESCE(SUM(usd),0) usd FROM lp_rewards WHERE mode=? AND ticker=? AND hour >= ? AND hour <= ?",
+            (
+                mode,
+                ticker,
+                start.astimezone(UTC).strftime("%Y-%m-%dT%H:00"),
+                end.astimezone(UTC).strftime("%Y-%m-%dT%H:00"),
+            ),
+        ).fetchone()
+        return float(row["usd"])
+
+    def lp_net_spent(self, mode: str) -> float:
+        """What fills (with fees) cost minus what settlements paid back, before any reward."""
+        spent = self.db.execute(
+            "SELECT COALESCE(SUM(qty*price + fee),0) c FROM lp_fills WHERE mode=?", (mode,)
+        ).fetchone()["c"]
+        back = self.db.execute("SELECT COALESCE(SUM(payout),0) p FROM lp_settlements WHERE mode=?", (mode,)).fetchone()
+        return float(spent) - float(back["p"])
 
     def lp_reward_for(self, mode: str, ticker: str, since: datetime) -> float:
         hour_cut = since.astimezone(UTC).strftime("%Y-%m-%dT%H:00")

@@ -189,3 +189,23 @@ def test_the_settlement_cutoff_counts_too():
     acct.http = Http()
     snaps = [Snapshot(at(40), 100.0, 0.0), Snapshot(at(60), 100.0, 0.0), Snapshot(at(1440), 105.0, 0.0)]
     assert reconcile(acct, snaps).start == at(60)
+
+
+def test_the_period_check_counts_only_periods_kalshi_should_have_paid_in_the_window():
+    from omen.ledger import Ledger
+    from omen.liquidity.programs import Program
+    from omen.liquidity.reconcile import period_check
+
+    ledger = Ledger(":memory:")
+    w0, w1 = T0, T0 + timedelta(days=7)
+    paid = Program("A", w0 - timedelta(days=2), w0 + timedelta(days=3), 50, 1000, 0.5)  # ends Thu: paid by Fri
+    tiny = Program("B", w0, w0 + timedelta(days=1), 5, 1000, 0.5)  # earns under $1: Kalshi pays nothing
+    late = Program("C", w0 + timedelta(days=4), w1 + timedelta(hours=12), 60, 1000, 0.5)  # paid next window
+    ledger.lp_record_programs("live", [paid, tiny, late])
+    ledger.lp_add_reward("live", w0 + timedelta(hours=5), "A", 3.456, 3600)
+    ledger.lp_add_reward("live", w0 + timedelta(hours=5), "B", 0.5, 3600)
+    ledger.lp_add_reward("live", w0 + timedelta(days=5), "C", 2.0, 3600)
+    pc = period_check(ledger, "live", w0, w1)
+    assert (pc.closed, pc.open_periods) == (2, 1)
+    assert pc.formula == pytest.approx(3.956) and pc.expected == pytest.approx(3.45)
+    assert pc.open_estimate == pytest.approx(2.0)

@@ -1,0 +1,10 @@
+[Unit]
+Description=OMEN playbook scout (daily 18:41 local time; set the Pi to America/New_York)
+
+[Timer]
+OnCalendar=*-*-* 18:41:00
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1409,3 +1409,116 @@ def test_the_fill_guard_is_live_only(tmp_path):
     ledger.lp_record_fill("paper", Fill(T0 - timedelta(hours=2), "KXRT-FILM-90", "no", 0.01, 900, 0.0, "x", "t1"))
     svc.step()
     assert not svc.kill_file().exists()
+
+
+def test_an_empty_only_dead_side_quote_skips_sides_someone_else_bids_on():
+    from omen.liquidity.maker import dead_side_quote
+
+    shared = book("M", yes=[(0.98, 2000)], no=[(0.01, 50)])
+    empty = book("M", yes=[(0.98, 2000)], no=[])
+    assert dead_side_quote(shared, 1000, 0.5, {}, 12.0) is not None
+    assert dead_side_quote(shared, 1000, 0.5, {}, 12.0, empty_only=True) is None
+    assert dead_side_quote(empty, 1000, 0.5, {}, 12.0, empty_only=True).size == 1100
+
+
+def test_live_orders_carry_an_expiry_when_the_quote_has_one():
+    when = datetime(2026, 11, 1, 18, tzinfo=UTC)
+    assert "expiration_time" not in LiveVenue.order_body(Quote("M", "no", 0.01, 1100), "c")
+    body = LiveVenue.order_body(Quote("M", "no", 0.01, 1100, expires=when), "c")
+    assert body["expiration_time"] == int(when.timestamp()) and body["time_in_force"] == "good_till_canceled"
+
+
+def test_live_dead_side_bids_expire_at_the_stop_before_close(tmp_path):
+    fake = FakeKalshi()
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+    svc, _ = live_service(tmp_path, fake)
+    svc.step()
+    close = datetime(2026, 11, 1, tzinfo=UTC)
+    stop = timedelta(minutes=svc.cfg.dead_side_stop_before_close_minutes)
+    assert svc.venue.client.created[0]["expiration_time"] == int((close - stop).timestamp())
+
+
+def test_dead_sides_skip_programs_that_end_long_before_the_market_closes(tmp_path):
+    fake = FakeKalshi()  # the program ends Oct 25 00:00Z; the market closes Nov 1
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+    svc, _ = service(tmp_path, fake)
+    svc.cfg.dead_side_close_gap_hours = 24
+    assert svc.step()["dead_quotes"] == 0
+    fake.close = "2026-10-25T12:00:00Z"
+    fake.now = T0 + timedelta(minutes=1)
+    svc._refreshed = None
+    assert svc.step()["dead_quotes"] == 1
+
+
+def test_decided_markets_are_kept_before_the_dead_side_cap(tmp_path):
+    fake = FakeKalshi()
+    svc, _ = service(tmp_path, fake)
+    svc.cfg.max_markets = 1  # cap of 10 dead-side programs
+    progs = [Program(f"KXR-{i}", T0, T0 + timedelta(days=1), 500.0 - i, 1000, 0.5) for i in range(12)]
+    progs.append(Program("KXR-POOR", T0, T0 + timedelta(days=1), 50.0, 1000, 0.5))
+    svc.client.orderbooks = lambda tickers: {
+        t: book(t, yes=[(0.98, 2000)], no=[]) if t == "KXR-POOR" else book(t, yes=[(0.40, 900)], no=[(0.55, 900)])
+        for t in tickers
+    }
+    kept = svc._dead_candidates(progs, T0)
+    assert [p.ticker for p in kept] == ["KXR-POOR"]  # the only decided market, though it pays the least
+
+
+def test_killed_live_cycles_keep_recording_cash_for_reconcile(tmp_path):
+    fake = FakeKalshi()
+    svc, ledger = live_service(tmp_path, fake)
+    svc.kill_file().write_text("stop")
+    svc.step()
+    assert len(ledger.lp_cash("live")) == 1
+
+
+def test_the_absolute_fill_loss_cap_stops_live_quoting(tmp_path):
+    fake = FakeKalshi()
+    svc, ledger = live_service(tmp_path, fake)
+    svc.cfg.max_fill_loss_usd = 5.0
+    ledger.lp_record_fill("live", Fill(T0 - timedelta(days=5), "KXRT-FILM-90", "no", 0.01, 900, 0.0, "x", "t1"))
+    ledger.lp_add_reward("live", T0 - timedelta(hours=2), "KXRT-FILM-90", 100.0, 3600)  # the ratio guard is happy
+    svc.step()
+    assert svc.kill_file().exists() and "settlements paid back" in svc.kill_file().read_text()
+
+
+def test_a_market_kalshi_refuses_with_403_is_not_retried_for_hours():
+    c = FakeTradingClient()
+    real = c.create_order
+    calls = {"n": 0}
+
+    def forbidden(body):
+        calls["n"] += 1
+        raise HttpError("POST /portfolio/events/orders -> HTTP 403", 403, "location attestation required")
+
+    c.create_order = forbidden
+    v = LiveVenue(c)
+    v.sync([Quote("M", "no", 0.01, 1100)], {}, T0)
+    v.sync([Quote("M", "no", 0.01, 1100)], {}, T0 + timedelta(minutes=1))
+    assert calls["n"] == 1 and not v.pending
+    c.create_order = real
+    v.sync([Quote("M", "no", 0.01, 1100)], {}, T0 + timedelta(hours=7))
+    assert len(c.created) == 1
+
+
+def test_programs_longer_than_the_cap_are_not_quoted():
+    progs = [
+        Program("A", T0, T0 + timedelta(days=3), 300, 1000, 0.5),
+        Program("B", T0, T0 + timedelta(days=10), 900, 1000, 0.5),
+    ]
+    kw = dict(min_hours=24, min_reward_per_day=5, exclude="", min_time_left=timedelta(minutes=10), limit=None)
+    assert [p.ticker for p in eligible(progs, T0 + timedelta(hours=1), **kw)] == ["A", "B"]  # $100/day, $90/day
+    assert [p.ticker for p in eligible(progs, T0 + timedelta(hours=1), max_hours=168, **kw)] == ["A"]
+
+
+def test_live_cycles_add_up_what_the_replay_fill_model_expected(tmp_path):
+    from omen.liquidity.service import MODELED_FILLS
+
+    fake = FakeKalshi()
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+    svc, ledger = live_service(tmp_path, fake)
+    svc.step()  # places the 1c bid
+    assert ledger.get_meta(MODELED_FILLS) is None
+    fake.now = T0 + timedelta(minutes=1)
+    svc.step()  # one minute resting at the test settings' prior of 1 contract a minute
+    assert float(ledger.get_meta(MODELED_FILLS)) == pytest.approx(0.01)

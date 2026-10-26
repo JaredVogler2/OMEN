@@ -246,6 +246,9 @@ point) minute by minute.
 It is one week, and the rewards are the filed formula's, not Kalshi's payouts. Treat it as what a live trial should
 roughly reproduce, not as a forecast.
 
+**For the weekly routine after the Oct 28, 2026 amendment, see `docs/PLAYBOOK.md`**: default $0, a daily
+`omen lp scout` GO/NO-GO test, and one capped measurement only on GO.
+
 **Independent live evidence: read this before any live run.** A public case study
 ([mirabilis-agent/lip-ledger](https://github.com/mirabilis-agent/lip-ledger), `docs/POSTMORTEM.md`) ran a $20 account
 on Kalshi from Oct 2 to Oct 10, 2026, mostly in hourly temperature programs, which OMEN excludes. It included 1c bids
