@@ -424,34 +424,40 @@ class LiveVenue:
         price: float,
         now: datetime,
         created: datetime | None = None,
+        late: bool = False,
     ) -> None:
         if not order_id:
             return
-        if (
-            order_id not in self._ours
-            and created is not None
-            and (self._fills_since is None or created < self._fills_since)
-        ):
+        if late and order_id not in self._ours:
             # an order found late (adopted, or a create whose response was lost) may have filled before its id was
-            # known: read fills again from when it was placed (the ledger stores each fill once)
-            self._fills_since = created
-            if self.ledger is not None:
-                self.ledger.set_meta(FILLS_MARK, created.isoformat())
+            # known, and this cycle's fills poll skipped those fills: place nothing until a poll has booked them
+            # (sizes and budgets come from the ledger), and read fills again from when it was placed
+            self.fills_ok = False
+            if created is not None and (self._fills_since is None or created < self._fills_since):
+                self._fills_since = created
+                if self.ledger is not None:
+                    self.ledger.set_meta(FILLS_MARK, created.isoformat())
         self._ours.add(order_id)
         if self.ledger is not None:
             self.ledger.lp_add_order(self.mode, order_id, client_order_id, ticker, side, price, now)
 
     def _cancel(self, o: Resting) -> bool:
         """True once the order is gone. A cancel is safe to repeat, so it is retried on 429 (Basic tier: 100 write
-        tokens a second, 10 per cancel); one that still fails stays tracked and is tried again next cycle."""
+        tokens a second, 10 per cancel); one that still fails stays tracked and is tried again next cycle. An order
+        that filled (in full or in part) since the listing is not replaced until the next fills poll books it."""
         try:
-            self.client._signed(
+            resp = self.client._signed(
                 "DELETE", f"/portfolio/events/orders/{o.order_id}", params={"market_ticker": o.ticker}, retry=True
             )
         except HttpError as exc:
-            if exc.status != 404:  # 404: already filled or gone
+            if exc.status != 404:
                 self.errors.append(f"cancel {o.ticker}: {exc}")
                 return False
+            self._changed.add((o.ticker, o.side))  # already gone: most likely filled since the listing
+            return True
+        reduced = (resp or {}).get("reduced_by")  # what was still resting when the cancel landed
+        if reduced is not None and float(reduced) < o.size - 1e-9:
+            self._changed.add((o.ticker, o.side))
         return True
 
     def _orders(self, params: dict) -> list[dict] | None:
@@ -480,7 +486,7 @@ class LiveVenue:
         oid = row.get("order_id", "")
         side, price = self._row_side_price(row)
         key = (row.get("ticker", ""), side)
-        self._remember(oid, str(row.get("client_order_id") or ""), key[0], side, price, now, _when(row))
+        self._remember(oid, str(row.get("client_order_id") or ""), key[0], side, price, now, _when(row), late=True)
         self._resolve(key)
         o = Resting(key[0], side, price, float(row.get("remaining_count_fp") or 0), 0.0, oid, now - RECONCILE_GRACE)
         if key in self.orders and self.orders[key].order_id != oid:
@@ -549,7 +555,7 @@ class LiveVenue:
                 self._adopt(row, now)
             else:
                 side, price = self._row_side_price(row)
-                self._remember(row.get("order_id", ""), client_order_id, ticker, side, price, now, _when(row))
+                self._remember(row.get("order_id", ""), client_order_id, ticker, side, price, now, _when(row), True)
             return True
         return False
 
@@ -674,7 +680,7 @@ class LiveVenue:
                 continue
             side, price = self._row_side_price(row)
             ticker = row.get("ticker", "")
-            self._remember(oid, cid, ticker, side, price, now, _when(row))
+            self._remember(oid, cid, ticker, side, price, now, _when(row), late=True)
             if self.pending.get((ticker, side), ("",))[0] == cid:
                 self._resolve((ticker, side))  # a create of unknown outcome, found resting
             o = Resting(ticker, side, price, float(row.get("remaining_count_fp") or 0), 0.0, oid, now)

@@ -166,10 +166,11 @@ class FakeTradingClient:
                 raise HttpError("DELETE -> HTTP 429", 429, "too many requests")
             oid = path.rsplit("/", 1)[-1]
             self.cancelled.append(oid)
+            row = self.rows.get(oid) or next((r for r in self.leftovers if r["order_id"] == oid), None)
             if oid in self.rows:
                 self.rows[oid]["status"] = "canceled"
             self.leftovers = [r for r in self.leftovers if r["order_id"] != oid]
-            return {}
+            return {"order_id": oid, "reduced_by": row["remaining_count_fp"]} if row else {}
         if path == "/portfolio/orders":
             if params.get("status") == "resting":
                 rows = self.resting
@@ -310,6 +311,7 @@ class FakeKalshi:
         self.trading = True  # False: Kalshi's trading pause (Thursdays 3-5 AM ET)
         self.programs_up = True  # False: /incentive_programs answers 503
         self.tape_cursor = ""  # non-empty: the exchange-wide tape never runs out of pages
+        self.history_cursor = ""  # non-empty: a market's own trade history never runs out of pages
         self.book = {"yes_dollars": [["0.0500", "500.00"]], "no_dollars": [["0.9300", "2000.00"]]}
 
     def handler(self, request: httpx.Request) -> httpx.Response:
@@ -351,7 +353,7 @@ class FakeKalshi:
             )
         if u.path.endswith("/markets/trades"):
             if "ticker" in q:
-                return httpx.Response(200, json={"trades": self.history, "cursor": ""})
+                return httpx.Response(200, json={"trades": self.history, "cursor": self.history_cursor})
             return httpx.Response(200, json={"trades": self.trades, "cursor": self.tape_cursor})
         if u.path.endswith("/candlesticks"):
             return httpx.Response(200, json={"candlesticks": self.candles})
@@ -1313,3 +1315,62 @@ def test_a_program_list_that_keeps_failing_is_reported_once(tmp_path):
         fake.now = T0 + timedelta(minutes=5 * minute)
         svc.step()
     assert sent.count("Reward programs unreadable") == 1
+
+
+def test_an_order_found_late_is_not_replaced_until_its_fills_are_booked(tmp_path):
+    fake = FakeKalshi()
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+    svc, ledger = live_service(tmp_path, fake)
+    c = svc.venue.client
+    c.lose_creates = 1
+    svc.step()  # the create times out, but Kalshi took it
+    assert len(c.created) == 1 and svc.venue.pending
+    c.rows["o1"]["status"] = "executed"  # and it filled completely before the next cycle
+    c.fills_resp = {"fills": [{**fill_row("o1", 1100, T0 + timedelta(seconds=30)), "ticker": "KXRT-FILM-90"}]}
+    fake.now = T0 + timedelta(minutes=1)
+    svc.step()
+    assert len(c.created) == 1  # found by its client id, but its fills are not booked yet: nothing is placed
+    fake.now = T0 + timedelta(minutes=2)
+    svc.step()
+    assert ledger.lp_positions("live")["KXRT-FILM-90"]["no"][0] == 1100.0
+
+
+def test_a_cancel_that_finds_the_order_filled_waits_for_the_fill_before_replacing():
+    c = FakeTradingClient()
+    v = LiveVenue(c)
+    v.sync([Quote("M", "yes", 0.05, 500)], {}, T0)
+    real = c._signed
+
+    def filled_meanwhile(method, path, body=None, params=None, retry=False):
+        if method == "DELETE":
+            raise HttpError("DELETE -> HTTP 404", 404, "not found")
+        return real(method, path, body, params, retry)
+
+    c._signed = filled_meanwhile  # it filled after this cycle's listing
+    later = T0 + timedelta(minutes=1)
+    v.reconcile(later)
+    v.sync([Quote("M", "yes", 0.06, 500)], {}, later)  # the price moved: cancel and replace
+    assert len(c.created) == 1 and not v.orders  # gone, and not replaced before the fill is booked
+
+
+def test_a_cancel_that_reports_a_partial_fill_waits_for_the_fill_before_replacing():
+    c = FakeTradingClient()
+    v = LiveVenue(c)
+    v.sync([Quote("M", "yes", 0.05, 500)], {}, T0)
+    later = T0 + timedelta(minutes=1)
+    v.reconcile(later)
+    c.rows["o1"]["remaining_count_fp"] = "200.00"  # 300 filled after the listing; the cancel removes 200
+    v.sync([Quote("M", "yes", 0.06, 500)], {}, later)
+    assert c.cancelled == ["o1"] and len(c.created) == 1
+    v.reconcile(later + timedelta(minutes=1))
+    v.sync([Quote("M", "yes", 0.06, 500)], {}, later + timedelta(minutes=1))
+    assert len(c.created) == 2
+
+
+def test_a_market_whose_trade_history_is_cut_off_is_not_seeded_or_quoted(tmp_path):
+    fake = FakeKalshi()
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+    fake.history_cursor = "more"
+    svc, _ = service(tmp_path, fake)
+    svc.step()
+    assert not svc.flow.seeded("KXRT-FILM-90") and svc.step()["dead_quotes"] == 0

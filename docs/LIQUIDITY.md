@@ -389,11 +389,13 @@ What Kalshi's API docs (read in full on 2026-10-25) mean for a live run:
 * **When reads fail.** A cycle that cannot read Kalshi's resting orders or our fills (an error, or more pages than
   OMEN reads) places nothing, but still cancels orders that are no longer wanted, such as bids near the close or in
   an ended program. After five minutes of failed reads it posts one warning to Discord, and another when reads
-  recover. An order that shrank or vanished since the fills poll is replaced only after the next poll books the
-  fill. If the program list cannot be refreshed, quotes still stop ten minutes before each known program ends, and
+  recover. An order that shrank or vanished since the fills poll, that a cancel finds partly or fully filled, or
+  that was found late (adopted, or a create whose response was lost) is replaced only after the next poll books its
+  fills. If the program list cannot be refreshed, quotes still stop ten minutes before each known program ends, and
   three failed refreshes in a row post a warning. A minute whose public tape was cut off is left out of the 1¢
-  selling-flow measure rather than read as a quiet minute. The service delivers only its own Discord messages, for
-  at most ten seconds a cycle, so a slow Discord cannot hold up cancels.
+  selling-flow measure rather than read as a quiet minute, and a market whose day of trade history is cut off is
+  not quoted. The service delivers only its own Discord messages, for at most ten seconds a cycle, so a slow Discord
+  cannot hold up cancels.
 * **Location attestation.** Since August 2026 each API key carries `api_key_region_expiration_ts`
   (`GET /api_keys`); after that date the key cannot trade Sports, Elections or Entertainment markets, which
   include Trump-approval and Rotten Tomatoes. Renew the attestation in the Kalshi app before it lapses.

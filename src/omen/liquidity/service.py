@@ -332,6 +332,10 @@ class LiquidityService:
                 cursor = data.get("cursor") or ""
                 if not cursor:
                     break
+            if cursor:  # a cut-off history would undercount 1c sales: leave the market unseeded (and unquoted)
+                self.last_error = f"flow history {ticker}: more than {MAX_TAPE_PAGES} pages"
+                log.warning(self.last_error)
+                return
         except HttpError as exc:
             self.last_error = f"flow history {ticker}: {exc}"
             log.warning(self.last_error)
