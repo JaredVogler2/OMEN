@@ -36,6 +36,7 @@ class Quote:
     price: float
     size: int
     keep_min: float = 0.0  # replace the resting order once fills leave it smaller than this
+    expires: datetime | None = None  # live: Kalshi cancels the order at this time even if OMEN cannot
 
 
 @dataclass(frozen=True)
@@ -94,7 +95,12 @@ def decided(book: OrderBook) -> tuple[str, str] | None:
 
 
 def dead_side_quote(
-    book: OrderBook, target: float, discount: float, held_cost: dict[str, float], max_loss: float
+    book: OrderBook,
+    target: float,
+    discount: float,
+    held_cost: dict[str, float],
+    max_loss: float,
+    empty_only: bool = False,
 ) -> Quote | None:
     """A 1c bid that completes the empty side of a decided market, or None.
 
@@ -112,6 +118,8 @@ def dead_side_quote(
     lv_dead, lv_live = levels(book, dead), levels(book, live)
     if side_score(lv_dead, target, discount).met or not side_score(lv_live, target, discount).met:
         return None  # already paid (or can't be completed from this side alone)
+    if empty_only and lv_dead:
+        return None  # the replays only ever bid sides with no bid at all: a shared side is an untested market
     if lv_live[0][0] + 0.01 >= 1 - 1e-9:
         return None
     # the side must reach the target in every snapshot: one contract short and the snapshot pays nobody, so rest a
@@ -343,6 +351,7 @@ class PaperVenue:
 RECONCILE_GRACE = timedelta(seconds=30)  # an order this new may not be listed yet: the API lags the exchange
 FILLS_LOOKBACK = timedelta(minutes=10)  # fills are re-read this far back, so an order adopted late still books them
 PENDING_TIMEOUT = timedelta(minutes=5)  # a create with an unknown outcome is looked for this long, then forgotten
+FORBIDDEN_COOLDOWN = timedelta(hours=6)  # a create refused with 403 (e.g. a lapsed location attestation) waits this
 FILLS_MARK = "lp_live_fills_since"  # ledger meta key: the last successful fills poll
 MAX_PAGES = 100  # 200 rows a page; a listing that has more than this is treated as a failed read
 
@@ -377,6 +386,7 @@ class LiveVenue:
         self.fills_ok = True  # the last read of our fills worked
         self._seen_fills: set[str] = set()
         self._changed: set[tuple[str, str]] = set()  # keys whose order shrank or vanished in this cycle's reconcile
+        self._cooldown: dict[tuple[str, str], datetime] = {}  # keys Kalshi refused with 403, until this time
         # every order id this venue (or an earlier run) placed or adopted: other fills on the account are not ours
         self._ours: set[str] = ledger.lp_order_ids(self.mode) if ledger is not None else set()
         self._fills_since: datetime | None = None  # the last successful fills poll (kept in the ledger)
@@ -394,7 +404,7 @@ class LiveVenue:
     def order_body(q: Quote, client_order_id: str) -> dict:
         """V2 quotes the YES book: buying YES at p is a ``bid`` at p; buying NO at q is an ``ask`` at 1 - q."""
         price = q.price if q.side == "yes" else 1 - q.price
-        return {
+        body = {
             "ticker": q.ticker,
             "client_order_id": client_order_id,
             "side": "bid" if q.side == "yes" else "ask",
@@ -405,6 +415,9 @@ class LiveVenue:
             "self_trade_prevention_type": "taker_at_cross",
             "cancel_order_on_pause": True,
         }
+        if q.expires is not None:  # good till canceled, but never past the stop: a Pi that is down cannot cancel it
+            body["expiration_time"] = int(q.expires.timestamp())
+        return body
 
     @staticmethod
     def _row_side_price(row: dict) -> tuple[str, float]:
@@ -571,6 +584,8 @@ class LiveVenue:
         for key, q in want.items():
             if key in self.orders or key in self.pending or key in self._changed:
                 continue  # resting as wanted, a cancel that failed, a create of unknown outcome, or a fresh fill
+            if self._cooldown.get(key, now) > now:
+                continue  # Kalshi refused this market for this account (403): do not retry every cycle
             cid = f"{self.tag}-{uuid.uuid4().hex[:12]}"
             # recorded before it is sent: a process stopped mid-request (SIGTERM, SIGKILL, power loss) still finds
             # this order by its client id at the next sweep or start, and books its fills
@@ -583,6 +598,8 @@ class LiveVenue:
                 self.errors.append(f"place {q.ticker} {q.side}@{q.price}: {exc}")
                 if exc.status is not None and exc.status < 500:
                     self._resolve(key)  # a 4xx (post-only cross, 429, bad request) placed nothing: retry next cycle
+                    if exc.status == 403:
+                        self._cooldown[key] = now + FORBIDDEN_COOLDOWN
                 continue  # timeout, reset or 5xx: Kalshi may have taken it; looked up by client id until known
             oid = resp.get("order_id", "")
             self._remember(oid, cid, q.ticker, q.side, q.price, now)

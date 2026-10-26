@@ -171,6 +171,7 @@ class LiquiditySettings:
     max_contracts_per_order: int = 500
     min_reward_per_day_usd: float = 5.0
     min_program_hours: float = 12.0  # skip 15-minute and hourly programs (fast markets pick resting orders off)
+    max_program_hours: float = 0.0  # skip programs longer than this (0: no cap); the Oct 28, 2026 rules allow 1-7 days
     stop_before_close_minutes: int = 720  # fills in the last 12 hours before close lost ~7c/contract in history
     # fast markets, plus markets that resolve on what someone says or on insider-decided outcomes (fills lost
     # 23-73c per contract-day there in the settled-market replay)
@@ -203,6 +204,25 @@ class LiquiditySettings:
     fill_guard_ratio: float = 0.6
     fill_guard_min_usd: float = 5.0  # judge only once fills have cost at least this much
     fill_guard_hours: int = 72
+    # live: also write the kill file once fills (plus fees) minus what settlements paid back reach this many dollars,
+    # whatever the rewards (they arrive later, as cash). 0 turns it off. Use a fresh state dir for each trial.
+    max_fill_loss_usd: float = 0.0
+    # dead sides that match docs/PLAYBOOK.md's scout (0 / false turns a filter off): the replays only ever bid sides
+    # with no bid at all, 1-7 day programs pay little per reward dollar unless they run into the close, and the $1
+    # per-period minimum needs a period reward with room in it
+    dead_side_empty_only: bool = False
+    dead_side_min_period_reward_usd: float = 0.0
+    dead_side_max_target: float = 0.0  # contracts; a side above this costs more than dead_side_max_loss_usd allows
+    dead_side_close_gap_hours: float = 0.0  # the program must end at most this long before the market closes
+    # `omen lp scout`: GO for one capped measurement only when every condition holds (docs/PLAYBOOK.md)
+    scout_go_pool_per_day_usd: float = 20_000.0
+    scout_go_markets: int = 30
+    scout_go_series: int = 5
+    scout_long_program_weight: float = 0.3  # programs of 48 h or more earned ~0.3x per reward dollar in the replays
+    # set to true only after Kalshi's Liquidity Rewards page shows the same per-market rewards the API lists (the
+    # amendment sets rewards per sub-category; if the API repeats a pooled amount on every market, every estimate
+    # in OMEN is too high)
+    scout_rewards_confirmed: bool = False
 
 
 @dataclass

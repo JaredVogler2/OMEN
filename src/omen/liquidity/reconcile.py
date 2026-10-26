@@ -12,8 +12,9 @@ would be counted as a purchase.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from typing import Any
 
@@ -195,3 +196,30 @@ def reconcile(client: Any, snaps: list[Snapshot]) -> Reconciliation:
         {c: credits(a, b, flows, c) for c in (True, False)},
         cutoff,
     )
+
+
+@dataclass
+class PeriodCheck:
+    """OMEN's estimate for the reward periods Kalshi should have paid inside a window, by its own rule: a period is
+    paid up to a day after it ends, and only if the account's share comes to at least $1.00 (rounded down)."""
+
+    closed: int  # periods that ended in time to be paid inside the window
+    formula: float  # OMEN's estimate for them
+    expected: float  # the same after the $1 minimum and rounding down
+    open_periods: int  # periods still running at the window's end, or ended too late to be paid inside it
+    open_estimate: float  # what OMEN estimates they had earned by the window's end (paid in a later window)
+
+
+def period_check(ledger: Any, mode: str, start: datetime, end: datetime) -> PeriodCheck:
+    """Periods that ended between a day before ``start`` and a day before ``end`` are the ones Kalshi pays inside
+    [start, end]; a weekly window does not line up with 1-7 day periods otherwise."""
+    closed = ledger.lp_programs_ended(mode, start - timedelta(days=1), end - timedelta(days=1))
+    formula = expected = 0.0
+    for ticker, s, e in closed:
+        est = ledger.lp_reward_in_period(mode, ticker, s, e)
+        formula += est
+        expected += math.floor(est * 100 + 1e-9) / 100 if est >= 1.0 else 0.0
+    never = datetime.max.replace(tzinfo=UTC)
+    later = [(t, s, e) for t, s, e in ledger.lp_programs_ended(mode, end - timedelta(days=1), never) if s < end]
+    open_estimate = sum(ledger.lp_reward_in_period(mode, t, s, min(e, end)) for t, s, e in later)
+    return PeriodCheck(len(closed), formula, expected, len(later), open_estimate)

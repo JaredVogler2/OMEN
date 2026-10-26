@@ -1,0 +1,14 @@
+# Daily GO/NO-GO test of docs/PLAYBOOK.md on Kalshi's posted reward programs; posts the verdict to Discord.
+# Rendered by scripts/install-pi.sh --with-scout-timer. Public data only (a few hundred requests); places nothing.
+[Unit]
+Description=OMEN playbook scout (liquidity rewards GO/NO-GO)
+
+[Service]
+Type=oneshot
+User=@USER@
+WorkingDirectory=@APP_DIR@
+EnvironmentFile=@ENV_FILE@
+Environment=OMEN_STATE_DIR=@STATE_DIR@ OMEN_PROJECT_ROOT=@APP_DIR@
+ExecStart=@UV@ run --frozen --no-sync omen lp scout --notify
+Nice=10
+MemoryMax=400M

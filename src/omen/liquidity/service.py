@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from omen.alerts.discord import Notifier
@@ -39,6 +40,7 @@ PROGRAM_END_MARGIN = timedelta(minutes=10)  # stop quoting a program this long b
 UNREADY_WARN = timedelta(minutes=5)  # live: say so once Kalshi's orders or our fills have been unreadable this long
 REFRESH_FAILURES_WARN = 3  # say so once the reward program list has failed this many refreshes in a row
 FLUSH_BUDGET_SECONDS = 10.0  # Discord delivery per cycle; the rest waits for the next cycle
+MODELED_FILLS = "lp_modeled_fill_usd"  # ledger meta: what the replays' fill model would have charged our live 1c bids
 
 
 def policy_from(settings: Settings) -> QuotePolicy:
@@ -132,6 +134,8 @@ class LiquidityService:
                 )
             stats["killed"] = True
             self._rates = {}
+            if self.mode == "live":  # payouts keep arriving after a stop: reconcile needs the cash to cover them
+                self._record_cash(now)
             return stats
         self._killed = False
         if self._refreshed is None or now - self._refreshed >= REFRESH:
@@ -150,6 +154,7 @@ class LiquidityService:
         # paper fills come from the public tape; dead-side completion also needs it (live) to measure 1c sales
         tape = self._tape(now) if self.mode == "paper" or self.cfg.complete_dead_sides else []
         self._observe_flow(now, tape)
+        self._model_fills(now)
         if self.mode == "paper":
             new = self._book_fills(self.venue.fills(tape, now) + self._imputed_dead_fills(now))
         # the interval just ended earned the average of its start rate and its end rate: the end rate prices our
@@ -214,25 +219,46 @@ class LiquidityService:
             exclude=self.cfg.exclude_series,
             min_time_left=PROGRAM_END_MARGIN,
             limit=self.cfg.max_markets,
+            max_hours=self.cfg.max_program_hours,
         )
-        self.dead_programs = (
-            eligible(
-                active,
-                now,
-                min_hours=self.cfg.min_program_hours,
-                min_reward_per_day=self.cfg.min_reward_per_day_usd,
-                exclude=self.cfg.dead_side_exclude_series,
-                min_time_left=PROGRAM_END_MARGIN,
-                limit=10 * self.cfg.max_markets,
-            )
-            if self.cfg.complete_dead_sides
-            else []
-        )
+        self.dead_programs = self._dead_candidates(active, now) if self.cfg.complete_dead_sides else []
+        self.ledger.lp_record_programs(self.mode, [*self.programs, *self.dead_programs])
         self.flow.forget({p.ticker for p in self.dead_programs})  # markets whose programs left the list
         held = set(self.ledger.lp_positions(self.mode))
         tickers = sorted({p.ticker for p in self.programs} | {p.ticker for p in self.dead_programs} | held)
         self.markets = {m.ticker: m for m in self.client.markets_by_ticker(tickers)} if tickers else {}
         self._refreshed = now
+
+    def _dead_candidates(self, active: list[Program], now: datetime) -> list[Program]:
+        """Programs whose market may need its dead side completed: the configured filters first, then only markets
+        decided right now, richest first, capped. Deciding before the cap matters: most decided markets sit far below
+        the richest programs, which are mostly undecided."""
+        lp = self.cfg
+        cands = [
+            p
+            for p in eligible(
+                active,
+                now,
+                min_hours=lp.min_program_hours,
+                min_reward_per_day=lp.min_reward_per_day_usd,
+                exclude=lp.dead_side_exclude_series,
+                min_time_left=PROGRAM_END_MARGIN,
+                limit=None,
+                max_hours=lp.max_program_hours,
+            )
+            if p.reward_usd >= lp.dead_side_min_period_reward_usd
+            and (lp.dead_side_max_target <= 0 or p.target <= lp.dead_side_max_target)
+        ]
+        limit = 10 * lp.max_markets
+        if len(cands) <= limit:
+            return cands
+        try:
+            books = self.client.orderbooks([p.ticker for p in cands])
+        except HttpError as exc:  # keep the richest, as before, until the books read
+            self.last_error = f"dead-side books: {exc}"
+            return cands[:limit]
+        held = set(self.ledger.lp_positions(self.mode))
+        return [p for p in cands if p.ticker in held or (p.ticker in books and decided(books[p.ticker]))][:limit]
 
     def _tape(self, now: datetime) -> list[dict]:
         """Public trades since the last cycle, exchange-wide (a few requests instead of one per market)."""
@@ -290,6 +316,21 @@ class LiquidityService:
                 or (self.mode == "live" and ours is not None and ours.price <= 0.01 + 1e-9)
             )
             self.flow.observe(p.ticker, now, elapsed.total_seconds() / 60 if supply else 0.0, sold)
+
+    def _model_fills(self, now: datetime) -> None:
+        """Live: add what the replays' fill model (each market's measured 1c selling rate) would have charged our
+        resting 1c bids this interval. Real fills against this total are the test docs/PLAYBOOK.md uses: the replays
+        break even at about 3x, and the one independent live run measured 10-30x on bids like these."""
+        if self.mode != "live":
+            return
+        modeled = sum(
+            min(o.size, self.flow.rate(ticker, now, self.cfg.dead_side_flow_prior) * self._flow_minutes) * o.price
+            for (ticker, _), o in self.venue.orders.items()
+            if o.price <= 0.01 + 1e-9 and o.size > 0
+        )
+        if modeled > 0:
+            total = float(self.ledger.get_meta(MODELED_FILLS) or 0) + modeled
+            self.ledger.set_meta(MODELED_FILLS, f"{total:.6f}")
 
     def _imputed_dead_fills(self, now: datetime) -> list[Fill]:
         """Paper only: a 1c dead-side bid of ours that rests alone faces the market's measured selling flow, but the
@@ -360,6 +401,17 @@ class LiquidityService:
                 return None
             return book
 
+        def expires(p: Program, stop_minutes: int) -> datetime | None:
+            m = self.markets.get(p.ticker)  # Kalshi cancels the order at the stop even if this process is down
+            return m.close_time - timedelta(minutes=stop_minutes) if m is not None and m.close_time else None
+
+        def runs_into_close(p: Program) -> bool:
+            # 1-7 day programs that end long before the market closes paid little in the replays: by the time the
+            # market is decided (when dead sides appear), such a program is over
+            m = self.markets.get(p.ticker)
+            gap = self.cfg.dead_side_close_gap_hours
+            return gap <= 0 or m is None or m.close_time is None or p.end >= m.close_time - timedelta(hours=gap)
+
         def nets_held(ticker: str, side: str) -> bool:
             # buying the side opposite our position nets it on Kalshi (a YES and a NO pay $1 back at once): that is a
             # trade, not liquidity, and it would read as a reward credit in `omen lp reconcile`
@@ -383,6 +435,7 @@ class LiquidityService:
                 continue
             cost = {side: v[1] for side, v in held.get(p.ticker, {}).items()}
             for q in self.policy.quotes(book, cost):
+                q = replace(q, expires=expires(p, self.cfg.stop_before_close_minutes))
                 if nets_held(q.ticker, q.side):
                     continue
                 rate = reward_rate(p, book, {q.side: (q.price, q.size)})
@@ -394,12 +447,15 @@ class LiquidityService:
         backfills = 0
         for p in self.dead_programs:
             book = usable(p, self.cfg.dead_side_stop_before_close_minutes)
-            if book is None:
+            if book is None or not runs_into_close(p):
                 continue
             cost = {side: v[1] for side, v in held.get(p.ticker, {}).items()}
-            q = dead_side_quote(book, p.target, p.discount, cost, self.cfg.dead_side_max_loss_usd)
+            q = dead_side_quote(
+                book, p.target, p.discount, cost, self.cfg.dead_side_max_loss_usd, self.cfg.dead_side_empty_only
+            )
             if q is None or nets_held(q.ticker, q.side):
                 continue
+            q = replace(q, expires=expires(p, self.cfg.dead_side_stop_before_close_minutes))
             rate = reward_rate(p, book, {q.side: (q.price, q.size)})
             if not reaches_min_payout(p, rate, self.cfg.dead_side_stop_before_close_minutes):
                 continue
@@ -471,26 +527,36 @@ class LiquidityService:
 
     def _fill_guard(self, now: datetime) -> None:
         """Live: stop for good (the kill file) when real fills cost more than ``fill_guard_ratio`` of the estimated
-        rewards over the trailing window. The fill model behind every replay reads sales off the public tape, which
-        cannot show what a bid nobody else posted would face; fills that run well above the replays mean that model
-        is wrong for this account, and the reward does not pay for them."""
-        if self.mode != "live" or self.cfg.fill_guard_ratio <= 0 or self.kill_file().exists():
+        rewards over the trailing window, or once fills minus settlement payouts reach ``max_fill_loss_usd``. The fill
+        model behind every replay reads sales off the public tape, which cannot show what a bid nobody else posted
+        would face; fills that run well above the replays mean that model is wrong for this account, and the reward
+        does not pay for them."""
+        if self.mode != "live" or self.kill_file().exists():
             return
-        s = self.ledger.lp_summary(self.mode, now - timedelta(hours=self.cfg.fill_guard_hours))
-        cost = s["notional"] + s["fees"]
-        if cost < self.cfg.fill_guard_min_usd or cost <= self.cfg.fill_guard_ratio * s["reward_usd"]:
-            return
-        reason = (
-            f"fills cost ${cost:.2f} in the last {self.cfg.fill_guard_hours} h against ${s['reward_usd']:.2f} of "
-            f"estimated rewards (limit {self.cfg.fill_guard_ratio:.0%})"
-        )
+        spent = self.ledger.lp_net_spent(self.mode) if self.cfg.max_fill_loss_usd > 0 else 0.0
+        if self.cfg.max_fill_loss_usd > 0 and spent >= self.cfg.max_fill_loss_usd:
+            reason = (
+                f"fills have cost ${spent:.2f} more than settlements paid back "
+                f"(limit ${self.cfg.max_fill_loss_usd:.2f}, rewards not counted)"
+            )
+        else:
+            if self.cfg.fill_guard_ratio <= 0:
+                return
+            s = self.ledger.lp_summary(self.mode, now - timedelta(hours=self.cfg.fill_guard_hours))
+            cost = s["notional"] + s["fees"]
+            if cost < self.cfg.fill_guard_min_usd or cost <= self.cfg.fill_guard_ratio * s["reward_usd"]:
+                return
+            reason = (
+                f"fills cost ${cost:.2f} in the last {self.cfg.fill_guard_hours} h against ${s['reward_usd']:.2f} of "
+                f"estimated rewards (limit {self.cfg.fill_guard_ratio:.0%})"
+            )
         self.kill_file().parent.mkdir(parents=True, exist_ok=True)
         self.kill_file().write_text(f"fill guard {now.isoformat(timespec='seconds')}: {reason}\n")
         log.error("fill guard: %s", reason)
         self._say(
             "Liquidity quoting stopped (fill guard)",
-            f"{reason}. The replays had fills at about a third of the rewards, so this is outside what they "
-            f"support. Every order is canceled and nothing new is placed until {self.kill_file()} is removed.",
+            f"{reason}. That is outside what the replays support. Every order is canceled and nothing new is placed "
+            f"until {self.kill_file()} is removed.",
             "warning",
         )
 

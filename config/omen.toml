@@ -114,7 +114,8 @@ max_total_capital_usd = 1000.0
 max_series_share = 0.30           # no series (often one news event or settlement) gets more than 30% of the capital
 max_contracts_per_order = 500
 min_reward_per_day_usd = 5.0
-min_program_hours = 12.0          # 15-minute and hourly programs lost more to fills than they paid in the backtest
+min_program_hours = 24.0          # the Oct 28, 2026 rules allow periods of 1-7 days (shorter ones lost money anyway)
+max_program_hours = 168.0
 stop_before_close_minutes = 720   # cheap-side fills in the last 12 h before close lost ~7c/contract; earlier ones marked out +2c
 # series where resting orders were picked off in the backtest (fast prices, scheduled data, live sports)
 exclude_series = '15M$|^KXTEMP\w*H$|RATEH$|^KXAAAGAS|^KXDIESEL|MATCH$|^KXCRYPTOLEAD|GAME$|SPREAD|TOTAL|MENTION|SAY|TRUTHSOCIAL|ELIMINATION|^KXVMA|NETFLIX'
@@ -130,6 +131,13 @@ dead_side_exclude_series = '15M$|^KXTEMP\w*H$|RATEH$|^KXCRYPTOLEAD'
 dead_side_max_flow_ratio = 0.5
 dead_side_flow_prior = 3.0        # contracts a minute assumed until 30 minutes of 1c bids were seen (median 2.8)
 dead_side_stop_before_close_minutes = 360   # dead-side bids lose at most 1c a contract; 6 h beat 12 h in the replay
+# what docs/PLAYBOOK.md's scout counts, so OMEN trades what the GO test measured: sides with no bid at all (the only
+# kind the replays bid), at least $30 a period (room for the $1 minimum), Target Size up to 1,000 (1,100 contracts at
+# 1c fit a $12 per-market loss cap), and programs that run to within 24 h of the market's close
+dead_side_empty_only = true
+dead_side_min_period_reward_usd = 30.0
+dead_side_max_target = 1000.0
+dead_side_close_gap_hours = 24.0
 # Kalshi runs several matching engines (shards) and keeps a balance on each; an API order fails unless its shard
 # holds the funds. 97% of rewarded markets trade on shard 0 (Oct 2026); list others only after funding them
 # (Kalshi's target balance allocation or an intra-account transfer).
@@ -142,3 +150,10 @@ summary_every_hours = 6
 fill_guard_ratio = 0.6
 fill_guard_min_usd = 5.0
 fill_guard_hours = 72
+max_fill_loss_usd = 0.0           # live trial: 15 (docs/PLAYBOOK.md); 0 is off
+# `omen lp scout` (docs/PLAYBOOK.md): GO for one capped measurement only when all of these hold
+scout_go_pool_per_day_usd = 20000.0
+scout_go_markets = 30
+scout_go_series = 5
+scout_long_program_weight = 0.3
+scout_rewards_confirmed = false   # true only once Kalshi's Liquidity Rewards page matches the API's per-market rewards

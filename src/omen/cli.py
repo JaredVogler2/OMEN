@@ -412,7 +412,7 @@ def _lp_reconcile(s: Settings, args: argparse.Namespace) -> int:
 
     from omen.config import PROD_BASE_URL
     from omen.kalshi.auth import KalshiSigner
-    from omen.liquidity.reconcile import Snapshot, reconcile
+    from omen.liquidity.reconcile import Snapshot, period_check, reconcile
 
     if not (s.kalshi_api_key_id and s.kalshi_private_key_path):
         print("reconciling reads the account: set KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PATH", file=sys.stderr)
@@ -421,7 +421,10 @@ def _lp_reconcile(s: Settings, args: argparse.Namespace) -> int:
     since = datetime.fromisoformat(args.since) if args.since else None
     if since is not None and since.tzinfo is None:
         since = since.replace(tzinfo=UTC)
-    snaps = [Snapshot(ts, b, h) for ts, b, h in ledger.lp_cash("live", since)]
+    until = datetime.fromisoformat(args.until) if args.until else None
+    if until is not None and until.tzinfo is None:
+        until = until.replace(tzinfo=UTC)
+    snaps = [Snapshot(ts, b, h) for ts, b, h in ledger.lp_cash("live", since) if until is None or ts <= until]
     if len(snaps) < 2:
         print("no live cash snapshots yet: `omen lp run` records one every cycle in live mode")
         return 1
@@ -452,11 +455,46 @@ def _lp_reconcile(s: Settings, args: argparse.Namespace) -> int:
         else:
             how = f"the balance {'counts' if r.holds_in_balance else 'excludes'} resting-order cash; {r.votes} agree"
         print(f"  reward credits: ${r.paid:.2f} ({how})")
-    # Kalshi pays up to a day after a period ends: compare with what OMEN estimated it earned until a day earlier
-    est = ledger.lp_reward_between("live", r.start, r.end - timedelta(days=1))
-    print(f"  OMEN's formula estimate, earned until a day before the end: ${est:.2f}")
-    if r.paid is not None and est > 0:
-        print(f"  paid / estimated: {r.paid / est:.0%}")
+    pc = period_check(ledger, "live", r.start, r.end)
+    if pc.closed or pc.open_periods:  # Kalshi pays each reward period up to a day after it ends
+        print(
+            f"  reward periods Kalshi should have paid in this window: {pc.closed}; OMEN's estimate ${pc.formula:.2f}, "
+            f"${pc.expected:.2f} after the $1 minimum"
+        )
+        print(f"  still open (paid in a later window): {pc.open_periods}, ${pc.open_estimate:.2f} earned so far")
+        est = pc.expected
+    else:  # no period records (a run from before they were kept): compare with rewards earned until a day earlier
+        est = ledger.lp_reward_between("live", r.start, r.end - timedelta(days=1))
+        print(f"  OMEN's formula estimate, earned until a day before the end: ${est:.2f}")
+    if r.paid is not None:
+        if est > 0:
+            print(f"  paid / estimated: {r.paid / est:.0%}")
+        net = r.paid + f.settlements - f.fills - f.fees
+        print(f"  net (paid + settlements - fills - fees): ${net:+.2f}")
+        if r.paid > 0:
+            print(f"  fills / paid: {f.fills / r.paid:.0%}")
+    return 0
+
+
+def _lp_scout(s: Settings, args: argparse.Namespace, now: datetime) -> int:
+    """docs/PLAYBOOK.md's weekly GO/NO-GO test on what Kalshi has posted (public data only; places nothing)."""
+    from zoneinfo import ZoneInfo
+
+    from omen.alerts.render import notice_payload
+    from omen.liquidity.scout import render, scout
+
+    start = datetime.fromisoformat(args.start) if args.start else now
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=ZoneInfo("America/New_York"))
+    report = scout(_client(s), s.liquidity, start, args.days)
+    text = render(report, ZoneInfo("America/New_York"))
+    print(text)
+    if args.notify:
+        ledger = Ledger(s.database)
+        notifier = _notifier(s, ledger)
+        title = "Playbook scout: " + ("GO" if report.go else "NO-GO")
+        notifier.queue("research", notice_payload(title, text, "warning" if report.go else "info"), "scout", None, now)
+        notifier.flush(now, purposes={"scout"})
     return 0
 
 
@@ -506,6 +544,13 @@ def cmd_lp(s: Settings, args: argparse.Namespace) -> int:
             )
         unreal = sm["inventory_mark"] - sm["inventory_cost"]
         print(f"  inventory: cost ${sm['inventory_cost']:.2f}, marked ${sm['inventory_mark']:.2f} ({unreal:+.2f})")
+        if service.mode == "live":
+            from omen.liquidity.service import MODELED_FILLS
+
+            modeled = float(ledger.get_meta(MODELED_FILLS) or 0)
+            real = sm["total"]["notional"] + sm["total"]["fees"]
+            ratio = f" ({real / modeled:.1f}x)" if modeled > 0 else ""
+            print(f"  fills: ${real:.2f} real against ${modeled:.2f} the replays' model expected{ratio}")
         for ticker, sides in sorted(held.items()):
             m = mid(books.get(ticker))
             for side, (q, c) in sides.items():
@@ -517,6 +562,8 @@ def cmd_lp(s: Settings, args: argparse.Namespace) -> int:
         return 0
     if args.lp_cmd == "reconcile":
         return _lp_reconcile(s, args)
+    if args.lp_cmd == "scout":
+        return _lp_scout(s, args, now)
     # programs: what the policy would earn per dollar in each live program right now
     client = _client(s)
     lp = s.liquidity
@@ -621,6 +668,11 @@ def main(argv: list[str] | None = None) -> int:
     lps.add_parser("status", help="rewards, fills, inventory and settled P&L")
     lrc = lps.add_parser("reconcile", help="what Kalshi actually paid in rewards (live), against OMEN's estimate")
     lrc.add_argument("--since", help="ISO time to start from (default: the first live cash snapshot)")
+    lrc.add_argument("--until", help="ISO time to stop at (default: the last live cash snapshot)")
+    lsc = lps.add_parser("scout", help="weekly GO/NO-GO test on posted reward programs (docs/PLAYBOOK.md)")
+    lsc.add_argument("--from", dest="start", help="week start, ISO (ET if no offset; default: now)")
+    lsc.add_argument("--days", type=float, default=7.0)
+    lsc.add_argument("--notify", action="store_true", help="also post the verdict to Discord (research channel)")
     lpg = lps.add_parser("programs", help="rank live reward programs by what the policy would earn per dollar")
     lpg.add_argument("--top", type=int, default=25)
     lpp.set_defaults(fn=cmd_lp)
