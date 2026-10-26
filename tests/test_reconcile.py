@@ -52,15 +52,16 @@ def fill(ts: datetime, count: float, price: float, fee: float = 0.0, side: str =
     }
 
 
-def test_snapshot_counts_what_resting_buy_orders_hold():
+def test_snapshot_counts_what_every_resting_order_holds():
     acct = FakeAccount(
         100.0,
         orders=[
-            {
+            {  # a 1c NO bid is a V2 "ask": legacy rows may still say action "sell"
                 "outcome_side": "no",
                 "no_price_dollars": "0.0100",
                 "yes_price_dollars": "0.9900",
                 "remaining_count_fp": "1100.00",
+                "action": "sell",
             },
             {
                 "outcome_side": "yes",
@@ -68,11 +69,16 @@ def test_snapshot_counts_what_resting_buy_orders_hold():
                 "no_price_dollars": "0.9500",
                 "remaining_count_fp": "200.00",
             },
-            {"outcome_side": "yes", "yes_price_dollars": "0.0300", "remaining_count_fp": "50.00", "action": "sell"},
+            {
+                "book_side": "ask",
+                "yes_price_dollars": "0.9700",
+                "no_price_dollars": "0.0300",
+                "remaining_count_fp": "50.00",
+            },
         ],
     )
     snap = take_snapshot(acct, T0)
-    assert snap.balance == 100.0 and snap.holds == pytest.approx(11.0 + 10.0)
+    assert snap.balance == 100.0 and snap.holds == pytest.approx(11.0 + 10.0 + 1.5)
 
 
 def test_flows_add_up_fills_fees_settlements_and_transfers_inside_the_window():

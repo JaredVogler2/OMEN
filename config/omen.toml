@@ -136,3 +136,9 @@ dead_side_stop_before_close_minutes = 360   # dead-side bids lose at most 1c a c
 exchange_indexes = [0]
 
 summary_every_hours = 6
+# live only: write the kill file (cancel everything, place nothing) once fills over the trailing 72 h cost more than
+# 60% of the rewards estimated for those hours, after at least $5 of fills. The replays had fills at about a third of
+# the rewards; an independent live run of 1c dead-side bids found more. Remove <state_dir>/KILL to resume.
+fill_guard_ratio = 0.6
+fill_guard_min_usd = 5.0
+fill_guard_hours = 72

@@ -246,6 +246,42 @@ point) minute by minute.
 It is one week, and the rewards are the filed formula's, not Kalshi's payouts. Treat it as what a live trial should
 roughly reproduce, not as a forecast.
 
+**Independent live evidence: read this before any live run.** A public case study
+([mirabilis-agent/lip-ledger](https://github.com/mirabilis-agent/lip-ledger), `docs/POSTMORTEM.md`) ran a $20 account
+on Kalshi from Oct 2 to Oct 10, 2026, mostly in hourly temperature programs, which OMEN excludes. It included 1c bids
+on the empty side of decided markets, the play above.
+
+* **Rewards:** Kalshi paid within 1–3% of the filed formula on all four programs that reached $1 ($20.30 received).
+* **Fills:** they cost more than the rewards: $36.06 of trading losses over the same days. Over nine fill-heavy hours,
+  rewards were about $12.3 against $15.5 of fills.
+* **Sweeps:** fast traders swept 1c bids in clips of 200–600 contracts. Ten-second bursts reached about 1,400
+  contracts at the 90th percentile and about 6,000 at the 99th.
+* **Follower bot:** one joined at the same price within about 17 seconds of a side starting to count, and pulled out
+  at the first hit. The first bid took the sweeps and kept 25–50% of the reward.
+* **Tape models:** fill models built from the tape underestimated fills on bids placed in empty sides by 10–30x.
+
+Two of those mechanisms bias every replay and paper run here in the same direction:
+
+* **Fills.** The flow filter and the paper fills read sales off the public tape, which only shows sales into bids that
+  existed. A seller who would have dumped thousands of contracts into our bid is invisible.
+* **Reward share.** A paper order is never on Kalshi's book, so no follower reacts to it. The 65.6% share measured on
+  Oct 25 comes from that. A live order may keep less.
+
+How much fill underestimation each replay can absorb before its net reaches zero:
+
+| Replay (flat $100 a week, $1 minimum) | Reward | Fills | Fills could be this much larger |
+|---|---|---|---|
+| Aug–Sep, 67% share | $1,768 | $408 | 4.6x |
+| Oct 1–22, 67% | $1,339 | $433 | 3.2x |
+| Oct 1–22, 50% | $922 | $352 | 2.6x |
+| Oct 23–25, 67% | $156 | $52 | 3.0x |
+
+The live case study measured more than that. So treat the dead-side play as unproven until fills are measured on
+this account's own orders. Live mode therefore has a **fill guard** (`fill_guard_ratio`, on by default). Once fills
+over the trailing 72 hours cost more than 60% of the rewards estimated for those hours, after at least $5 of fills, it
+writes the kill file: every order is canceled and nothing is placed until the file is removed. The replays ran at
+23–33%, so tripping it means the fill model does not hold for this account.
+
 **How to read these numbers:**
 
 * **Fills, worst case:** our bid absorbs every sale.
@@ -377,12 +413,25 @@ What Kalshi's API docs (read in full on 2026-10-25) mean for a live run:
 * **Kalshi is the source of truth.** Every cycle starts by re-reading the account's resting orders: orders Kalshi
   no longer has are dropped, remaining sizes come from Kalshi (fills never adjust them), and any order of ours that
   OMEN does not track (client order id starting `omen-lp`) is adopted. That covers a create whose response was
-  lost: such a create is held as pending, never placed twice, and looked up by its client order id. Every placed
-  or adopted order id is kept in the ledger (`lp_orders`), so fills are attributed across restarts; fills are
-  re-read with a ten-minute overlap and stored once. The kill switch and shutdown cancel what OMEN tracks and then
-  every `omen-lp` order still resting on Kalshi, and shutdown books the last fills. A start-up during an API
-  outage no longer stops the service. OMEN never bids the side opposite a position it holds (Kalshi would net the
-  pair), and it settles inventory only once a market is finalized, not merely determined.
+  lost: every create is recorded as pending in the ledger (`lp_pending`) before it is sent, so even a process
+  killed mid-request finds the order by its client order id at the next sweep or start, and never places it twice.
+  Every placed or adopted order id is kept in the ledger (`lp_orders`), so fills are attributed across restarts;
+  fills are re-read with a ten-minute overlap and stored once, and an order found late has its fills re-read from
+  when it was placed. The kill switch and shutdown cancel what OMEN tracks, every `omen-lp` order still resting on
+  Kalshi, and any pending create they can find; shutdown sweeps again two seconds later if anything is unaccounted
+  for, then books the last fills. A start-up during an API outage no longer stops the service. OMEN never bids the
+  side opposite a position it holds (Kalshi would net the pair), and it settles inventory only once a market is
+  finalized, not merely determined.
+* **When reads fail.** A cycle that cannot read Kalshi's resting orders or our fills (an error, or more pages than
+  OMEN reads) places nothing, but still cancels orders that are no longer wanted, such as bids near the close or in
+  an ended program. After five minutes of failed reads it posts one warning to Discord, and another when reads
+  recover. An order that shrank or vanished since the fills poll, that a cancel finds partly or fully filled, or
+  that was found late (adopted, or a create whose response was lost) is replaced only after the next poll books its
+  fills. If the program list cannot be refreshed, quotes still stop ten minutes before each known program ends, and
+  three failed refreshes in a row post a warning. A minute whose public tape was cut off is left out of the 1¢
+  selling-flow measure rather than read as a quiet minute, and a market whose day of trade history is cut off is
+  not quoted. The service delivers only its own Discord messages, for at most ten seconds a cycle, so a slow Discord
+  cannot hold up cancels.
 * **Location attestation.** Since August 2026 each API key carries `api_key_region_expiration_ts`
   (`GET /api_keys`); after that date the key cannot trade Sports, Elections or Entertainment markets, which
   include Trump-approval and Rotten Tomatoes. Renew the attestation in the Kalshi app before it lapses.

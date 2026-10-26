@@ -5,9 +5,9 @@ Kalshi has no endpoint for reward credits: they arrive as cash in the balance. E
 credit. ``omen lp run`` in live mode records the balance and the cash held by resting orders every cycle; ``omen lp
 reconcile`` does the arithmetic and sets it against OMEN's own formula estimate.
 
-It assumes the account trades only through OMEN, which only buys: every fill is read as a purchase of its
-``outcome_side`` at that side's price (the deprecated ``action`` field is not used). A manual sale would be counted
-as a purchase.
+It assumes the account trades only through OMEN, which only buys: every fill and every resting order is read as a
+purchase of its ``outcome_side`` at that side's price (the deprecated ``action`` field is not used). A manual sale
+would be counted as a purchase.
 """
 
 from __future__ import annotations
@@ -72,9 +72,11 @@ def take_snapshot(client: Any, now: datetime) -> Snapshot:
     balance = float(bal["balance_dollars"]) if bal.get("balance_dollars") is not None else bal["balance"] / 100
     holds = 0.0
     for o in _pages(client, "/portfolio/orders", "orders", {"status": "resting", "limit": 200}):
-        if (o.get("action") or "buy") != "buy":
-            continue
-        price = o.get("yes_price_dollars") if o.get("outcome_side", "yes") == "yes" else o.get("no_price_dollars")
+        # every resting order is a purchase of its outcome side (a NO bid is a V2 "ask"; ``action`` is deprecated)
+        side = o.get("outcome_side")
+        if side not in ("yes", "no"):
+            side = "yes" if o.get("book_side") == "bid" else "no"
+        price = o.get("yes_price_dollars") if side == "yes" else o.get("no_price_dollars")
         holds += float(price or 0) * float(o.get("remaining_count_fp") or 0)
     return Snapshot(now, balance, round(holds, 4))
 

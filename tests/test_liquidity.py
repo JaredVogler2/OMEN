@@ -132,6 +132,8 @@ class FakeTradingClient:
         self.rows: dict[str, dict] = {}  # order id -> the Order row Kalshi lists
         self.leftovers: list[dict] = []  # resting orders of an earlier run, or placed by hand
         self.resting: list[dict] | None = None  # overrides what /portfolio/orders?status=resting lists
+        self.hidden: dict[str, int] = {}  # order id -> how many more /portfolio/orders listings leave it out (lag)
+        self.created_at = T0  # created_time of new orders
 
     def balance(self) -> dict:
         return {"balance": 10000, "balance_dollars": "100.0000"}
@@ -149,6 +151,7 @@ class FakeTradingClient:
             "no_price_dollars": f"{1 - yes:.4f}",
             "remaining_count_fp": body["count"],
             "status": "resting",
+            "created_time": self.created_at.isoformat().replace("+00:00", "Z"),
         }
         if self.lose_creates:
             self.lose_creates -= 1
@@ -163,10 +166,11 @@ class FakeTradingClient:
                 raise HttpError("DELETE -> HTTP 429", 429, "too many requests")
             oid = path.rsplit("/", 1)[-1]
             self.cancelled.append(oid)
+            row = self.rows.get(oid) or next((r for r in self.leftovers if r["order_id"] == oid), None)
             if oid in self.rows:
                 self.rows[oid]["status"] = "canceled"
             self.leftovers = [r for r in self.leftovers if r["order_id"] != oid]
-            return {}
+            return {"order_id": oid, "reduced_by": row["remaining_count_fp"]} if row else {}
         if path == "/portfolio/orders":
             if params.get("status") == "resting":
                 rows = self.resting
@@ -176,8 +180,17 @@ class FakeTradingClient:
                 rows = self.leftovers + list(self.rows.values())
             if params.get("ticker"):
                 rows = [r for r in rows if r.get("ticker") == params["ticker"]]
-            return {"orders": rows, "cursor": ""}
-        return self.fills_resp
+            lagging = {oid for oid, n in self.hidden.items() if n > 0}
+            for oid in lagging:
+                self.hidden[oid] -= 1
+            return {"orders": [r for r in rows if r["order_id"] not in lagging], "cursor": ""}
+        since = params.get("min_ts")
+        rows = [
+            f
+            for f in self.fills_resp.get("fills") or []
+            if since is None or datetime.fromisoformat(f["created_time"].replace("Z", "+00:00")).timestamp() >= since
+        ]
+        return {**self.fills_resp, "fills": rows}
 
 
 def test_live_orders_are_post_only_gtc_and_no_bids_become_yes_asks():
@@ -296,6 +309,9 @@ class FakeKalshi:
         self.close = "2026-11-01T00:00:00Z"
         self.shard = 0
         self.trading = True  # False: Kalshi's trading pause (Thursdays 3-5 AM ET)
+        self.programs_up = True  # False: /incentive_programs answers 503
+        self.tape_cursor = ""  # non-empty: the exchange-wide tape never runs out of pages
+        self.history_cursor = ""  # non-empty: a market's own trade history never runs out of pages
         self.book = {"yes_dollars": [["0.0500", "500.00"]], "no_dollars": [["0.9300", "2000.00"]]}
 
     def handler(self, request: httpx.Request) -> httpx.Response:
@@ -304,6 +320,8 @@ class FakeKalshi:
         if u.path.endswith("/exchange/status"):
             return httpx.Response(200, json={"exchange_active": True, "trading_active": self.trading})
         if u.path.endswith("/incentive_programs"):
+            if not self.programs_up:
+                return httpx.Response(503, json={})
             return httpx.Response(
                 200,
                 json={
@@ -334,8 +352,9 @@ class FakeKalshi:
                 },
             )
         if u.path.endswith("/markets/trades"):
-            trades = self.history if "ticker" in q else self.trades
-            return httpx.Response(200, json={"trades": trades, "cursor": ""})
+            if "ticker" in q:
+                return httpx.Response(200, json={"trades": self.history, "cursor": self.history_cursor})
+            return httpx.Response(200, json={"trades": self.trades, "cursor": self.tape_cursor})
         if u.path.endswith("/candlesticks"):
             return httpx.Response(200, json={"candlesticks": self.candles})
         if u.path.endswith("/markets"):
@@ -771,6 +790,9 @@ def test_orders_kalshi_cancelled_on_its_own_are_dropped_and_placed_again():
     assert v.reconcile(later) == 1
     assert ("M", "no") not in v.orders and v.orders[("N", "no")].size == 700.0
     v.sync([Quote("M", "no", 0.01, 1100), Quote("N", "no", 0.01, 1100)], {}, later)
+    assert len(c.created) == 2  # M may have filled: it waits for the next fills poll
+    v.reconcile(later + timedelta(minutes=1))
+    v.sync([Quote("M", "no", 0.01, 1100), Quote("N", "no", 0.01, 1100)], {}, later + timedelta(minutes=1))
     assert len(c.created) == 3 and c.created[-1]["ticker"] == "M"  # M is placed again; N keeps its 700
 
 
@@ -1042,7 +1064,7 @@ def test_a_pending_create_is_kept_while_the_lookup_itself_fails():
     c.lose_creates = 1
     v.sync([Quote("M", "no", 0.01, 1100)], {}, T0)
     c.rows["o1"]["status"] = "executed"  # not listed as resting, so only the any-status lookup can find it
-    v._found = lambda ticker, cid, now: None  # ...and that lookup is down
+    v._found = lambda ticker, cid, sent, now: None  # ...and that lookup is down
     v.reconcile(T0 + timedelta(minutes=10))
     assert ("M", "no") in v.pending  # past the timeout, but never confirmed absent
 
@@ -1064,3 +1086,326 @@ def test_cancel_all_reports_failure_when_kalshis_orders_cannot_be_listed():
 
     c._signed = down
     assert v.cancel_all() is False  # the kill-switch notice must not claim everything was cancelled
+
+
+def test_a_create_cut_short_by_the_stop_is_found_and_canceled_on_exit(tmp_path):
+    fake = FakeKalshi()
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+    svc, ledger = live_service(tmp_path, fake)
+    c = svc.venue.client
+    real = c.create_order
+
+    def create_then_stop(body):  # Kalshi takes the order, then SIGTERM lands before the response is read
+        real(body)
+        c.hidden["o1"] = 2  # and the listings lag the exchange for a moment
+        raise SystemExit(0)
+
+    c.create_order = create_then_stop
+    sleeps: list[float] = []
+    with pytest.raises(SystemExit):
+        svc.run(cycles=1, sleep=sleeps.append)
+    assert c.cancelled == ["o1"] and sleeps == [2.0]  # the second sweep found it
+    assert ledger.lp_pending("live") == {} and "o1" in ledger.lp_order_ids("live")
+
+
+def test_an_order_cut_short_that_filled_while_stopped_books_its_fills_after_a_restart():
+    c = FakeTradingClient()
+    ledger = Ledger(":memory:")
+    v = LiveVenue(c, ledger=ledger)
+    v.fills([], T0)
+    real = c.create_order
+
+    def create_then_die(body):  # killed (SIGKILL, power loss) after Kalshi took the order
+        real(body)
+        raise SystemExit(0)
+
+    c.create_order = create_then_die
+    with pytest.raises(SystemExit):
+        v.sync([Quote("M", "no", 0.01, 1100)], {}, T0)
+    c.rows["o1"]["status"] = "executed"
+    c.fills_resp = {"fills": [fill_row("o1", 1100, T0 + timedelta(minutes=1))]}
+    later = T0 + timedelta(hours=3)
+    restarted = LiveVenue(c, ledger=ledger)
+    assert restarted.fills([], later) == []  # not known as ours yet
+    restarted.reconcile(later)  # found by its client id: its fills are read again from when it was placed
+    got = restarted.fills([], later + timedelta(minutes=1))
+    assert [(f.order_id, f.qty) for f in got] == [("o1", 1100.0)]
+    assert not restarted.pending
+
+
+def test_an_adopted_order_books_fills_from_before_it_was_adopted():
+    c = FakeTradingClient()
+    ledger = Ledger(":memory:")
+    v = LiveVenue(c, ledger=ledger)
+    v.fills([], T0 + timedelta(hours=2))
+    c.leftovers = [
+        {
+            "order_id": "old",
+            "client_order_id": "omen-lp-old",
+            "ticker": "M",
+            "outcome_side": "no",
+            "no_price_dollars": "0.0100",
+            "yes_price_dollars": "0.9900",
+            "remaining_count_fp": "600.00",
+            "status": "resting",
+            "created_time": T0.isoformat(),
+        }
+    ]
+    c.fills_resp = {"fills": [fill_row("old", 500, T0 + timedelta(minutes=30))]}
+    v.reconcile(T0 + timedelta(hours=2))
+    got = v.fills([], T0 + timedelta(hours=2, minutes=1))
+    assert [(f.order_id, f.qty) for f in got] == [("old", 500.0)]
+
+
+def test_a_cycle_that_cannot_read_fills_still_cancels_what_is_no_longer_wanted(tmp_path):
+    fake = FakeKalshi()
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+    svc, _ = live_service(tmp_path, fake)
+    c = svc.venue.client
+    svc.step()
+    assert len(c.created) == 1
+    real = c._signed
+
+    def fills_down(method, path, body=None, params=None, retry=False):
+        if path == "/portfolio/fills":
+            raise HttpError("GET /portfolio/fills -> HTTP 503", 503, "")
+        return real(method, path, body, params, retry)
+
+    c._signed = fills_down
+    fake.close = (T0 + timedelta(hours=2)).isoformat().replace("+00:00", "Z")  # inside the dead-side stop
+    fake.now = T0 + timedelta(minutes=10)
+    svc._refreshed = None
+    svc.step()
+    assert c.cancelled == ["o1"] and not svc.venue.ready and len(c.created) == 1
+
+
+def test_reads_failing_for_minutes_raise_one_warning_and_recovery_is_reported(tmp_path):
+    fake = FakeKalshi()
+    svc, _ = live_service(tmp_path, fake)
+    c = svc.venue.client
+    real = c._signed
+    sent: list[str] = []
+    svc._say = lambda title, body, severity: sent.append(title)
+
+    def fills_down(method, path, body=None, params=None, retry=False):
+        if path == "/portfolio/fills":
+            raise HttpError("GET /portfolio/fills -> HTTP 503", 503, "")
+        return real(method, path, body, params, retry)
+
+    c._signed = fills_down
+    for minute in range(8):
+        fake.now = T0 + timedelta(minutes=minute)
+        svc.step()
+    assert sent.count("Live reads failing") == 1
+    c._signed = real
+    fake.now = T0 + timedelta(minutes=9)
+    svc.step()
+    assert sent[-1] == "Live reads recovered"
+
+
+def test_a_fills_read_that_runs_out_of_pages_is_a_failed_read():
+    c = FakeTradingClient()
+    ledger = Ledger(":memory:")
+    v = LiveVenue(c, ledger=ledger)
+    v._ours.add("o1")
+    v.fills([], T0)
+    c.fills_resp = {"fills": [fill_row("o1", 10, T0 + timedelta(minutes=5))], "cursor": "more"}  # never ends
+    got = v.fills([], T0 + timedelta(hours=7))
+    assert [f.qty for f in got] == [10.0]  # what was read is booked once...
+    assert not v.ready and v._fills_since == T0  # ...but the window is read again, and nothing is placed meanwhile
+    assert ledger.get_meta("lp_live_fills_since") == T0.isoformat()
+
+
+def test_an_orders_listing_that_runs_out_of_pages_is_a_failed_read():
+    c = FakeTradingClient()
+    v = LiveVenue(c)
+    real = c._signed
+    c._signed = lambda method, path, body=None, params=None, retry=False: {
+        **real(method, path, body, params, retry),
+        "cursor": "more",
+    }
+    v.reconcile(T0)
+    assert not v.ready
+
+
+def test_the_flow_window_stays_bounded_and_forgets_markets_that_left():
+    from omen.liquidity.maker import DeadSideFlow
+
+    flow = DeadSideFlow()
+    for minute in range(3 * 1440):
+        flow.observe("M", T0 + timedelta(minutes=minute), 1.0, 0.0)
+    assert len(flow._obs["M"]) <= 1441  # one day at one entry a minute
+    flow.observe("N", T0, 1.0, 0.0)
+    flow._seeded |= {"M", "N"}
+    flow.forget({"M"})
+    assert set(flow._obs) == {"M"} and flow._seeded == {"M"}
+
+
+def test_an_ended_program_is_not_quoted_or_credited_when_the_list_cannot_refresh(tmp_path):
+    fake = FakeKalshi()
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+    svc, ledger = live_service(tmp_path, fake)
+    svc.step()
+    assert len(svc.venue.client.created) == 1
+    fake.programs_up = False  # the program ends at midnight UTC and the list cannot be read after that
+    for minutes in (20, 21):
+        fake.now = datetime(2026, 10, 25, 0, minutes, tzinfo=UTC)
+        svc._refreshed = None
+        svc.step()
+    assert svc.venue.client.cancelled == ["o1"] and not svc.venue.orders
+    hour = ledger.db.execute("SELECT SUM(usd) u FROM lp_rewards WHERE hour >= '2026-10-25T00:00'").fetchone()
+    assert not hour["u"]
+
+
+def test_a_slow_cycle_does_not_make_a_new_order_look_old_enough_to_drop(tmp_path):
+    fake = FakeKalshi()
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+    svc, _ = live_service(tmp_path, fake)
+    c = svc.venue.client
+    real = svc._trading_active
+
+    def slow():  # e.g. /exchange/status retried for over a minute before the creates
+        fake.now += timedelta(seconds=70)
+        return real()
+
+    svc._trading_active = slow
+    svc.step()
+    svc._trading_active = real
+    c.hidden["o1"] = 1  # the next cycle starts at once, and Kalshi's listing still lags
+    fake.now += timedelta(seconds=1)
+    svc.step()
+    assert len(c.created) == 1
+
+
+def test_an_order_that_shrank_since_the_fills_poll_is_not_replaced_until_the_fill_is_booked():
+    c = FakeTradingClient()
+    v = LiveVenue(c)
+    v.sync([Quote("M", "yes", 0.05, 500)], {}, T0)
+    c.rows["o1"]["remaining_count_fp"] = "200.00"  # filled after this cycle's fills poll
+    later = T0 + timedelta(minutes=1)
+    v.reconcile(later)
+    v.sync([Quote("M", "yes", 0.05, 500)], {}, later)
+    assert c.cancelled == ["o1"] and len(c.created) == 1  # too small to keep, but no full-size replacement yet
+    v.reconcile(later + timedelta(minutes=1))
+    v.sync([Quote("M", "yes", 0.05, 200)], {}, later + timedelta(minutes=1))  # sized with the fill booked
+    assert len(c.created) == 2 and c.created[-1]["count"] == "200.00"
+
+
+def test_an_incomplete_trade_tape_is_not_read_as_no_selling(tmp_path):
+    fake = FakeKalshi()
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": [["0.0100", "50.00"]]}
+    svc, _ = service(tmp_path, fake)
+    svc.step()
+    assert svc.flow._obs.get("KXRT-FILM-90")  # a 1c bid rested: a measured minute
+    fake.tape_cursor = "more"
+    fake.now = T0 + timedelta(minutes=1)
+    before = len(svc.flow._obs["KXRT-FILM-90"])
+    svc.step()
+    assert len(svc.flow._obs["KXRT-FILM-90"]) == before  # sales may be missing: the minute is not counted
+
+
+def test_a_program_list_that_keeps_failing_is_reported_once(tmp_path):
+    fake = FakeKalshi()
+    svc, _ = service(tmp_path, fake)
+    sent: list[str] = []
+    svc._say = lambda title, body, severity: sent.append(title)
+    svc.step()
+    fake.programs_up = False
+    for minute in range(1, 6):
+        fake.now = T0 + timedelta(minutes=5 * minute)
+        svc.step()
+    assert sent.count("Reward programs unreadable") == 1
+
+
+def test_an_order_found_late_is_not_replaced_until_its_fills_are_booked(tmp_path):
+    fake = FakeKalshi()
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+    svc, ledger = live_service(tmp_path, fake)
+    c = svc.venue.client
+    c.lose_creates = 1
+    svc.step()  # the create times out, but Kalshi took it
+    assert len(c.created) == 1 and svc.venue.pending
+    c.rows["o1"]["status"] = "executed"  # and it filled completely before the next cycle
+    c.fills_resp = {"fills": [{**fill_row("o1", 1100, T0 + timedelta(seconds=30)), "ticker": "KXRT-FILM-90"}]}
+    fake.now = T0 + timedelta(minutes=1)
+    svc.step()
+    assert len(c.created) == 1  # found by its client id, but its fills are not booked yet: nothing is placed
+    fake.now = T0 + timedelta(minutes=2)
+    svc.step()
+    assert ledger.lp_positions("live")["KXRT-FILM-90"]["no"][0] == 1100.0
+
+
+def test_a_cancel_that_finds_the_order_filled_waits_for_the_fill_before_replacing():
+    c = FakeTradingClient()
+    v = LiveVenue(c)
+    v.sync([Quote("M", "yes", 0.05, 500)], {}, T0)
+    real = c._signed
+
+    def filled_meanwhile(method, path, body=None, params=None, retry=False):
+        if method == "DELETE":
+            raise HttpError("DELETE -> HTTP 404", 404, "not found")
+        return real(method, path, body, params, retry)
+
+    c._signed = filled_meanwhile  # it filled after this cycle's listing
+    later = T0 + timedelta(minutes=1)
+    v.reconcile(later)
+    v.sync([Quote("M", "yes", 0.06, 500)], {}, later)  # the price moved: cancel and replace
+    assert len(c.created) == 1 and not v.orders  # gone, and not replaced before the fill is booked
+
+
+def test_a_cancel_that_reports_a_partial_fill_waits_for_the_fill_before_replacing():
+    c = FakeTradingClient()
+    v = LiveVenue(c)
+    v.sync([Quote("M", "yes", 0.05, 500)], {}, T0)
+    later = T0 + timedelta(minutes=1)
+    v.reconcile(later)
+    c.rows["o1"]["remaining_count_fp"] = "200.00"  # 300 filled after the listing; the cancel removes 200
+    v.sync([Quote("M", "yes", 0.06, 500)], {}, later)
+    assert c.cancelled == ["o1"] and len(c.created) == 1
+    v.reconcile(later + timedelta(minutes=1))
+    v.sync([Quote("M", "yes", 0.06, 500)], {}, later + timedelta(minutes=1))
+    assert len(c.created) == 2
+
+
+def test_a_market_whose_trade_history_is_cut_off_is_not_seeded_or_quoted(tmp_path):
+    fake = FakeKalshi()
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+    fake.history_cursor = "more"
+    svc, _ = service(tmp_path, fake)
+    svc.step()
+    assert not svc.flow.seeded("KXRT-FILM-90") and svc.step()["dead_quotes"] == 0
+
+
+def test_the_fill_guard_stops_live_quoting_when_fills_outrun_the_rewards(tmp_path):
+    fake = FakeKalshi()
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+    svc, ledger = live_service(tmp_path, fake)
+    sent: list[str] = []
+    svc._say = lambda title, body, severity: sent.append(title)
+    ledger.lp_record_fill("live", Fill(T0 - timedelta(hours=2), "KXRT-FILM-90", "no", 0.01, 900, 0.0, "x", "t1"))
+    ledger.lp_add_reward("live", T0 - timedelta(hours=2), "KXRT-FILM-90", 5.0, 3600)  # $9 of fills vs $5 of reward
+    svc.step()
+    assert svc.kill_file().exists() and "fill guard" in svc.kill_file().read_text()
+    assert svc.venue.client.created == [] and "Liquidity quoting stopped (fill guard)" in sent
+
+
+def test_the_fill_guard_lets_fills_within_the_replays_range_or_too_small_to_judge_pass(tmp_path):
+    for fills, reward in ((900, 40.0), (300, 0.0)):  # $9 against $40 of reward; $3 is below the $5 minimum
+        fake = FakeKalshi()
+        fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+        path = tmp_path / f"{fills}"
+        path.mkdir()
+        svc, ledger = live_service(path, fake)
+        ledger.lp_record_fill("live", Fill(T0 - timedelta(hours=2), "KXRT-FILM-90", "no", 0.01, fills, 0.0, "x", "t1"))
+        if reward:
+            ledger.lp_add_reward("live", T0 - timedelta(hours=2), "KXRT-FILM-90", reward, 3600)
+        svc.step()
+        assert not svc.kill_file().exists()
+
+
+def test_the_fill_guard_is_live_only(tmp_path):
+    fake = FakeKalshi()
+    svc, ledger = service(tmp_path, fake)
+    ledger.lp_record_fill("paper", Fill(T0 - timedelta(hours=2), "KXRT-FILM-90", "no", 0.01, 900, 0.0, "x", "t1"))
+    svc.step()
+    assert not svc.kill_file().exists()

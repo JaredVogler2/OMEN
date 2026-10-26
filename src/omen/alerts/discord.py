@@ -77,10 +77,13 @@ class DiscordTransport:
         bot_token: str | None = None,
         transport: httpx.BaseTransport | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        timeout: float = 20.0,
+        max_wait: float = 30.0,
     ):
         self.bot_token = bot_token
         self.sleep = sleep
-        self.client = httpx.Client(timeout=20, transport=transport, headers={"User-Agent": USER_AGENT})
+        self.max_wait = max_wait  # longest 429 back-off honored per retry
+        self.client = httpx.Client(timeout=timeout, transport=transport, headers={"User-Agent": USER_AGENT})
 
     def _headers(self, route: Route) -> dict[str, str]:
         h = {"Content-Type": "application/json"}
@@ -96,7 +99,7 @@ class DiscordTransport:
                     wait = float(resp.json().get("retry_after", 1.0))
                 except (ValueError, json.JSONDecodeError):
                     wait = float(resp.headers.get("Retry-After", "1"))
-                self.sleep(min(max(wait, 0.5), 30.0))
+                self.sleep(min(max(wait, 0.5), self.max_wait))
                 continue
             return resp
         return resp
@@ -158,11 +161,22 @@ class Notifier:
         ).fetchone()
         return int(row["n"])
 
-    def flush(self, now: datetime) -> tuple[int, int]:
+    def flush(
+        self,
+        now: datetime,
+        purposes: set[str] | None = None,
+        exclude: set[str] | None = None,
+        budget_seconds: float | None = None,
+    ) -> tuple[int, int]:
+        """Deliver queued messages (only ``purposes``, if given; never ``exclude``). With ``budget_seconds``, stop
+        starting new deliveries once that much time has passed: the rest wait for the next flush."""
         sent = failed = 0
         if self.dry_run:
             return 0, 0
-        for row in self.ledger.pending_outbox(MAX_ATTEMPTS):
+        started = time.monotonic()
+        for row in self.ledger.pending_outbox(MAX_ATTEMPTS, purposes, exclude):
+            if budget_seconds is not None and time.monotonic() - started >= budget_seconds:
+                break
             route = resolve(self.routes, row["channel"])
             if route is None or self.transport is None:
                 continue

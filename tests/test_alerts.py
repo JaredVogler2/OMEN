@@ -111,3 +111,32 @@ def test_discord_rate_limit_is_honoured():
     t = DiscordTransport(transport=httpx.MockTransport(lambda r: next(responses)), sleep=sleeps.append)
     assert t.send(Route("webhook", HOOK), {"content": "x"}) == "1"
     assert sleeps == [1.5]
+
+
+def test_a_flush_can_be_limited_to_some_purposes_and_a_time_budget(monkeypatch):
+    sent = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content)["content"])
+        clock["t"] += 6.0  # every delivery takes 6 s
+        return httpx.Response(200, json={"id": "1"})
+
+    clock = {"t": 0.0}
+    monkeypatch.setattr("omen.alerts.discord.time.monotonic", lambda: clock["t"])
+    ledger = Ledger(":memory:")
+    routes = build_routes({"research": HOOK}, None, {})
+    notifier = Notifier(ledger, routes, DiscordTransport(transport=httpx.MockTransport(handler), sleep=lambda s: None))
+    for i in range(3):
+        notifier.queue("research", {"content": f"lp{i}"}, "lp", None, NOW)
+    notifier.queue("research", {"content": "digest"}, "digest", None, NOW)
+    assert notifier.flush(NOW, purposes={"lp"}, budget_seconds=10.0) == (2, 0)  # the third waits for the next flush
+    assert sent == ["lp0", "lp1"]
+    assert notifier.flush(NOW, exclude={"lp"}) == (1, 0) and sent[-1] == "digest"
+
+
+def test_the_transport_s_rate_limit_wait_can_be_capped():
+    sleeps = []
+    responses = iter([httpx.Response(429, json={"retry_after": 25}), httpx.Response(200, json={"id": "1"})])
+    t = DiscordTransport(transport=httpx.MockTransport(lambda r: next(responses)), sleep=sleeps.append, max_wait=2.0)
+    assert t.send(Route("webhook", HOOK), {"content": "x"}) == "1"
+    assert sleeps == [2.0]
