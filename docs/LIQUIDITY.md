@@ -372,8 +372,17 @@ What Kalshi's API docs (read in full on 2026-10-25) mean for a live run:
   intra-account transfer) before listing it.
 * **Orders Kalshi cancels by itself.** Every Thursday 3–5 AM ET is a trading pause, and OMEN's orders carry
   `cancel_order_on_pause`, so they are cancelled. Kalshi also cancels resting orders when a paused market
-  reactivates, after close, and below a raised settlement floor. The live venue re-reads its resting orders every
-  cycle, drops the ones Kalshi no longer has, and places them again.
+  reactivates, after close, and below a raised settlement floor. OMEN places nothing while `GET /exchange/status`
+  says trading is paused, then places the bids again.
+* **Kalshi is the source of truth.** Every cycle starts by re-reading the account's resting orders: orders Kalshi
+  no longer has are dropped, remaining sizes come from Kalshi (fills never adjust them), and any order of ours that
+  OMEN does not track (client order id starting `omen-lp`) is adopted. That covers a create whose response was
+  lost: such a create is held as pending, never placed twice, and looked up by its client order id. Every placed
+  or adopted order id is kept in the ledger (`lp_orders`), so fills are attributed across restarts; fills are
+  re-read with a ten-minute overlap and stored once. The kill switch and shutdown cancel what OMEN tracks and then
+  every `omen-lp` order still resting on Kalshi, and shutdown books the last fills. A start-up during an API
+  outage no longer stops the service. OMEN never bids the side opposite a position it holds (Kalshi would net the
+  pair), and it settles inventory only once a market is finalized, not merely determined.
 * **Location attestation.** Since August 2026 each API key carries `api_key_region_expiration_ts`
   (`GET /api_keys`); after that date the key cannot trade Sports, Elections or Entertainment markets, which
   include Trump-approval and Rotten Tomatoes. Renew the attestation in the Kalshi app before it lapses.

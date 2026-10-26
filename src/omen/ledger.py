@@ -68,6 +68,9 @@ CREATE TABLE IF NOT EXISTS lp_settlements (
   payout REAL NOT NULL, PRIMARY KEY(mode, ticker));
 CREATE TABLE IF NOT EXISTS lp_cash (
   mode TEXT NOT NULL, ts TEXT NOT NULL, balance REAL NOT NULL, holds REAL NOT NULL, PRIMARY KEY(mode, ts));
+CREATE TABLE IF NOT EXISTS lp_orders (
+  mode TEXT NOT NULL, order_id TEXT NOT NULL, client_order_id TEXT, ticker TEXT NOT NULL, side TEXT NOT NULL,
+  price REAL NOT NULL, placed TEXT NOT NULL, PRIMARY KEY(mode, order_id));
 """
 
 
@@ -534,6 +537,28 @@ class Ledger:
             "settled_markets": float(settled["n"]),
             "settled_pnl": float(settled["pnl"]),
         }
+
+    def lp_add_order(
+        self, mode: str, order_id: str, client_order_id: str, ticker: str, side: str, price: float, placed: datetime
+    ) -> None:
+        """Every order the live venue placed or adopted: fills are ours only if their order id is here."""
+        self.db.execute(
+            "INSERT OR IGNORE INTO lp_orders(mode,order_id,client_order_id,ticker,side,price,placed) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (mode, order_id, client_order_id, ticker, side, price, iso(placed)),
+        )
+
+    def lp_order_ids(self, mode: str) -> set[str]:
+        return {r["order_id"] for r in self.db.execute("SELECT order_id FROM lp_orders WHERE mode=?", (mode,))}
+
+    def lp_last_activity(self, mode: str) -> datetime | None:
+        """The latest fill, order or cash snapshot on record: where a restarted venue resumes reading fills."""
+        row = self.db.execute(
+            "SELECT MAX(t) t FROM (SELECT MAX(ts) t FROM lp_fills WHERE mode=? UNION ALL "
+            "SELECT MAX(placed) FROM lp_orders WHERE mode=? UNION ALL SELECT MAX(ts) FROM lp_cash WHERE mode=?)",
+            (mode, mode, mode),
+        ).fetchone()
+        return datetime.fromisoformat(row["t"]) if row and row["t"] else None
 
     def lp_add_cash(self, mode: str, ts: datetime, balance: float, holds: float) -> None:
         self.db.execute(

@@ -110,8 +110,7 @@ class LiquidityService:
         stats: dict = {"time": now.isoformat(timespec="seconds"), "mode": self.mode}
         if self.kill_file().exists():
             self._accrue(now, {})
-            if self.venue.orders:  # every killed cycle until none is left: a cancel can fail (e.g. a 429)
-                self.venue.cancel_all()
+            self.venue.cancel_all()  # every killed cycle: tracked orders, then any of ours still resting on Kalshi
             if not self._killed:
                 self._killed = True
                 left = len(self.venue.orders)
@@ -128,6 +127,7 @@ class LiquidityService:
         self._killed = False
         if self._refreshed is None or now - self._refreshed >= REFRESH:
             self._refresh(now)
+        self.venue.reconcile(now)  # live: Kalshi's resting orders and sizes, before anything reads the local book
         held = self.ledger.lp_positions(self.mode)
         tickers = sorted({p.ticker for p in self.programs} | {p.ticker for p in self.dead_programs} | set(held))
         self.books = self.client.orderbooks(tickers) if tickers else {}
@@ -139,15 +139,14 @@ class LiquidityService:
         fills = self.venue.fills(tape, now)
         if self.mode == "paper":
             fills += self._imputed_dead_fills(now)
-        new = [f for f in fills if self.ledger.lp_record_fill(self.mode, f)]
-        if new:
-            self._report_fills(new)
+        new = self._book_fills(fills)
         # the interval just ended earned the average of its start rate and its end rate: the end rate prices our
         # orders where they actually rested in the new book (a best bid that moved past us, or a fill, cuts it)
         self._accrue(now, self._current_rates())
         held = self.ledger.lp_positions(self.mode)
         desired = self._desired(now, held)
-        self.venue.sync(desired, self.books, now)
+        if self.mode != "live" or self._trading_active():
+            self.venue.sync(desired, self.books, now)  # during a pause Kalshi rejects new orders: wait it out
         self._rates = self._current_rates()
         if self.mode == "live":
             self._record_cash(now)
@@ -320,6 +319,12 @@ class LiquidityService:
                 return None
             return book
 
+        def nets_held(ticker: str, side: str) -> bool:
+            # buying the side opposite our position nets it on Kalshi (a YES and a NO pay $1 back at once): that is a
+            # trade, not liquidity, and it would read as a reward credit in `omen lp reconcile`
+            other = "no" if side == "yes" else "yes"
+            return held.get(ticker, {}).get(other, [0.0])[0] > 0
+
         def reaches_min_payout(p: Program, rate: float, stop_minutes: int) -> bool:
             # a bid that cannot lift this period's reward to $1.00 before the period ends (or we stop) earns nothing
             m = self.markets.get(p.ticker)
@@ -337,6 +342,8 @@ class LiquidityService:
                 continue
             cost = {side: v[1] for side, v in held.get(p.ticker, {}).items()}
             for q in self.policy.quotes(book, cost):
+                if nets_held(q.ticker, q.side):
+                    continue
                 rate = reward_rate(p, book, {q.side: (q.price, q.size)})
                 if rate * 86400 / q.size < self.cfg.min_reward_per_contract_day:
                     continue  # the reward would not cover what fills cost on average
@@ -350,7 +357,7 @@ class LiquidityService:
                 continue
             cost = {side: v[1] for side, v in held.get(p.ticker, {}).items()}
             q = dead_side_quote(book, p.target, p.discount, cost, self.cfg.dead_side_max_loss_usd)
-            if q is None:
+            if q is None or nets_held(q.ticker, q.side):
                 continue
             rate = reward_rate(p, book, {q.side: (q.price, q.size)})
             if not reaches_min_payout(p, rate, self.cfg.dead_side_stop_before_close_minutes):
@@ -410,13 +417,25 @@ class LiquidityService:
                     self.ledger.lp_add_reward(self.mode, now, ticker, rate * seconds, seconds)
         self._last = now
 
+    def _book_fills(self, fills: list[Fill]) -> list[Fill]:
+        new = [f for f in fills if self.ledger.lp_record_fill(self.mode, f)]
+        if new:
+            self._report_fills(new)
+        return new
+
+    def _trading_active(self) -> bool:
+        try:
+            return bool(self.client.exchange_status().get("trading_active", True))
+        except HttpError:
+            return True  # unknown: try; Kalshi rejects orders during a pause anyway
+
     def _record_cash(self, now: datetime) -> None:
         # Kalshi reports no reward credits: `omen lp reconcile` finds them in the balance, from these snapshots
         client = getattr(self.venue, "client", None)  # the live venue's client is the signed one
         if client is None:
             return
         try:
-            snap = take_snapshot(client, now)
+            snap = take_snapshot(client, self.clock())  # stamped when read, not when the cycle began
         except (HttpError, KeyError, TypeError, ValueError) as exc:  # never stop quoting over bookkeeping
             log.warning("cash snapshot failed: %s", exc)
             return
@@ -426,7 +445,9 @@ class LiquidityService:
         done = 0
         for ticker in held:
             m = self.markets.get(ticker)
-            payout = m.payout_yes() if m is not None else None
+            if m is None or m.status not in ("finalized", "settled"):
+                continue  # a determined result can still be disputed and re-determined
+            payout = m.payout_yes()
             if payout is None:
                 continue
             pnl = self.ledger.lp_settle(self.mode, ticker, float(payout), now)
@@ -497,13 +518,13 @@ class LiquidityService:
         s = self.summary(now)
         d, t = s["day"], s["total"]
         unreal = s["inventory_mark"] - s["inventory_cost"]
-        net = t["reward_usd"] + t["settled_pnl"] + unreal - t["fees"]
+        net = t["reward_usd"] + t["settled_pnl"] + unreal  # costs already include fees
         body = (
             f"Last 24h: rewards ${d['reward_usd']:.2f} across {d['reward_markets']:.0f} markets, "
             f"{d['fills']:.0f} fills ({d['contracts']:.0f} contracts), settled P&L ${d['settled_pnl']:+.2f}.\n"
             f"All time: rewards ${t['reward_usd']:.2f}, settled P&L ${t['settled_pnl']:+.2f}, fees ${t['fees']:.2f}.\n"
             f"Inventory: cost ${s['inventory_cost']:.2f}, marked ${s['inventory_mark']:.2f} ({unreal:+.2f}).\n"
-            f"Net so far (rewards + settled + unrealized - fees): ${net:+.2f}"
+            f"Net so far (rewards + settled + unrealized, after fees): ${net:+.2f}"
         )
         if self.mode == "live":
             body += "\nRewards are estimated from the filed formula; Kalshi pays them after each period ends."
@@ -530,5 +551,9 @@ class LiquidityService:
                     sleep(max(0.0, self.cfg.cycle_seconds - (time.monotonic() - started)))
         finally:
             self.venue.cancel_all()
+            try:  # fills since the last poll would otherwise be lost with this process
+                self._book_fills(self.venue.fills([], self.clock()))
+            except Exception:  # shutting down: the next start re-reads fills from the ledger's last time
+                log.exception("final fills poll failed")
             if self.venue.orders:  # still resting on Kalshi: the next start cancels them (cancel_stale)
                 log.error("%d order(s) could not be canceled on exit", len(self.venue.orders))

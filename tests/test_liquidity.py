@@ -121,34 +121,62 @@ def test_paper_resync_keeps_queue_place_until_the_price_moves():
 
 # -------------------------------------------------------------------------------------------------- live venue
 class FakeTradingClient:
+    """The signed order endpoints of one Kalshi account: a created order rests until it is cancelled."""
+
     def __init__(self):
         self.created: list[dict] = []
         self.cancelled: list[str] = []
         self.fills_resp: dict = {"fills": []}
         self.fail_cancels = 0  # this many cancels answer 429 (after the HTTP client's own retries)
-        self.resting: list[dict] | None = None  # what Kalshi reports as resting (None: a previous run's leftovers)
+        self.lose_creates = 0  # this many creates are applied but their response is lost (a timeout)
+        self.rows: dict[str, dict] = {}  # order id -> the Order row Kalshi lists
+        self.leftovers: list[dict] = []  # resting orders of an earlier run, or placed by hand
+        self.resting: list[dict] | None = None  # overrides what /portfolio/orders?status=resting lists
+
+    def balance(self) -> dict:
+        return {"balance": 10000, "balance_dollars": "100.0000"}
 
     def create_order(self, body: dict) -> dict:
         self.created.append(body)
-        return {"order_id": f"o{len(self.created)}", "fill_count": "0.00", "remaining_count": body["count"]}
+        oid = f"o{len(self.created)}"
+        yes = float(body["price"])
+        self.rows[oid] = {
+            "order_id": oid,
+            "client_order_id": body["client_order_id"],
+            "ticker": body["ticker"],
+            "outcome_side": "yes" if body["side"] == "bid" else "no",
+            "yes_price_dollars": f"{yes:.4f}",
+            "no_price_dollars": f"{1 - yes:.4f}",
+            "remaining_count_fp": body["count"],
+            "status": "resting",
+        }
+        if self.lose_creates:
+            self.lose_creates -= 1
+            raise HttpError("POST /portfolio/events/orders: read timeout")  # no status: outcome unknown
+        return {"order_id": oid, "fill_count": "0.00", "remaining_count": body["count"]}
 
     def _signed(self, method: str, path: str, body=None, params=None, retry=False):
+        params = params or {}
         if method == "DELETE":
             if self.fail_cancels:
                 self.fail_cancels -= 1
                 raise HttpError("DELETE -> HTTP 429", 429, "too many requests")
-            self.cancelled.append(path.rsplit("/", 1)[-1])
+            oid = path.rsplit("/", 1)[-1]
+            self.cancelled.append(oid)
+            if oid in self.rows:
+                self.rows[oid]["status"] = "canceled"
+            self.leftovers = [r for r in self.leftovers if r["order_id"] != oid]
             return {}
         if path == "/portfolio/orders":
-            if self.resting is not None:
-                return {"orders": self.resting, "cursor": ""}
-            return {
-                "orders": [
-                    {"order_id": "old1", "ticker": "M", "client_order_id": "omen-lp-abc"},
-                    {"order_id": "manual", "ticker": "M", "client_order_id": "my-own-order"},
-                ],
-                "cursor": "",
-            }
+            if params.get("status") == "resting":
+                rows = self.resting
+                if rows is None:
+                    rows = self.leftovers + [r for r in self.rows.values() if r["status"] == "resting"]
+            else:
+                rows = self.leftovers + list(self.rows.values())
+            if params.get("ticker"):
+                rows = [r for r in rows if r.get("ticker") == params["ticker"]]
+            return {"orders": rows, "cursor": ""}
         return self.fills_resp
 
 
@@ -215,7 +243,19 @@ def test_live_ignores_fills_of_orders_it_did_not_place_and_cleans_up_a_previous_
         ]
     }
     assert v.fills([], T0) == []
-    assert v.cancel_stale() == 1 and c.cancelled == ["old1"]
+    c.leftovers = [
+        {
+            "order_id": "old1",
+            "ticker": "M",
+            "client_order_id": "omen-lp-abc",
+            "outcome_side": "no",
+            "no_price_dollars": "0.0100",
+            "yes_price_dollars": "0.9900",
+            "remaining_count_fp": "1100.00",
+        },
+        {"order_id": "manual", "ticker": "M", "client_order_id": "my-own-order", "outcome_side": "yes"},
+    ]
+    assert v.cancel_stale() == 1 and c.cancelled == ["old1"]  # the hand-placed order is left alone
 
 
 # ---------------------------------------------------------------------------------------------------- programs
@@ -255,11 +295,14 @@ class FakeKalshi:
         self.candles: list[dict] = []
         self.close = "2026-11-01T00:00:00Z"
         self.shard = 0
+        self.trading = True  # False: Kalshi's trading pause (Thursdays 3-5 AM ET)
         self.book = {"yes_dollars": [["0.0500", "500.00"]], "no_dollars": [["0.9300", "2000.00"]]}
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         u = urlsplit(str(request.url))
         q = parse_qs(u.query)
+        if u.path.endswith("/exchange/status"):
+            return httpx.Response(200, json={"exchange_active": True, "trading_active": self.trading})
         if u.path.endswith("/incentive_programs"):
             return httpx.Response(
                 200,
@@ -710,7 +753,7 @@ def test_a_failed_cancel_keeps_the_order_tracked_and_never_doubles_it():
     assert [o.order_id for o in v.orders.values()] == ["o1"] and len(c.created) == 1 and v.errors
     v.sync([Quote("M", "no", 0.02, 1100)], {}, T0)  # next cycle: canceled, then replaced
     assert c.cancelled == ["o1"] and c.created[-1]["price"] == "0.9800" and len(c.created) == 2
-    c.fail_cancels = 1
+    c.fail_cancels = 2  # the tracked cancel and the sweep's retry both hit 429
     v.cancel_all()
     assert ("M", "no") in v.orders  # still resting: kept so the kill switch or the next start can cancel it
     v.cancel_all()
@@ -750,3 +793,201 @@ def test_no_bids_on_an_exchange_shard_the_account_has_not_funded(tmp_path):
     svc._refreshed = None
     fake.now = T0 + timedelta(minutes=1)
     assert svc.step()["dead_quotes"] == 1
+
+
+# ----------------------------------------------------------------------------- live venue: review findings
+def fill_row(oid: str, qty: float, ts: datetime, fid: str = "f1", side: str = "no", price: float = 0.01) -> dict:
+    return {
+        "fill_id": fid,
+        "order_id": oid,
+        "ticker": "M",
+        "outcome_side": side,
+        "count_fp": f"{qty:.2f}",
+        "yes_price_dollars": f"{price if side == 'yes' else 1 - price:.4f}",
+        "no_price_dollars": f"{price if side == 'no' else 1 - price:.4f}",
+        "fee_cost": "0.0000",
+        "created_time": ts.isoformat().replace("+00:00", "Z"),
+    }
+
+
+def test_a_create_whose_response_was_lost_is_adopted_not_doubled():
+    c = FakeTradingClient()
+    v = LiveVenue(c)
+    q = Quote("M", "no", 0.01, 1100)
+    c.lose_creates = 1  # Kalshi took the order; the response timed out
+    v.sync([q], {}, T0)
+    assert ("M", "no") in v.pending and not v.orders
+    v.sync([q], {}, T0 + timedelta(seconds=10))
+    assert len(c.created) == 1  # never a second order while the first one's fate is unknown
+    later = T0 + timedelta(minutes=1)
+    v.reconcile(later)  # Kalshi lists it as resting with our client order id: adopted
+    assert v.orders[("M", "no")].order_id == "o1" and not v.pending
+    v.sync([q], {}, later)
+    assert len(c.created) == 1
+    c.fills_resp = {"fills": [fill_row("o1", 300, later)]}
+    assert [f.qty for f in v.fills([], later)] == [300.0]  # its fills are ours
+
+
+def test_a_lost_create_that_filled_before_it_was_seen_still_books_its_fills():
+    c = FakeTradingClient()
+    v = LiveVenue(c)
+    c.lose_creates = 1
+    v.sync([Quote("M", "no", 0.01, 1100)], {}, T0)
+    c.rows["o1"]["status"] = "executed"  # filled at once, so never listed as resting
+    later = T0 + timedelta(minutes=1)
+    v.reconcile(later)  # found among all of the market's orders by its client order id
+    assert not v.pending and not v.orders
+    c.fills_resp = {"fills": [fill_row("o1", 1100, T0 + timedelta(seconds=5))]}
+    assert [f.qty for f in v.fills([], later)] == [1100.0]
+
+
+def test_a_create_that_never_reached_kalshi_is_placed_again_after_the_timeout():
+    c = FakeTradingClient()
+    v = LiveVenue(c)
+    q = Quote("M", "no", 0.01, 1100)
+    c.lose_creates = 1
+    v.sync([q], {}, T0)
+    c.rows.clear()  # it was never applied
+    v.reconcile(T0 + timedelta(minutes=1))
+    v.sync([q], {}, T0 + timedelta(minutes=1))
+    assert len(c.created) == 1  # still within the timeout: wait
+    v.reconcile(T0 + timedelta(minutes=6))
+    v.sync([q], {}, T0 + timedelta(minutes=6))
+    assert len(c.created) == 2 and ("M", "no") in v.orders
+
+
+def test_fills_never_change_sizes_reconcile_reads_them_from_kalshi():
+    c = FakeTradingClient()
+    v = LiveVenue(c)
+    v.sync([Quote("M", "no", 0.01, 1100)], {}, T0)
+    later = T0 + timedelta(minutes=1)
+    c.fills_resp = {"fills": [fill_row("o1", 300, later)]}
+    v.fills([], later)
+    assert v.orders[("M", "no")].size == 1100  # not subtracted here...
+    c.rows["o1"]["remaining_count_fp"] = "800.00"
+    v.reconcile(later)
+    assert v.orders[("M", "no")].size == 800  # ...but taken from Kalshi, once
+
+
+def test_fills_of_an_earlier_run_are_booked_after_a_restart():
+    c = FakeTradingClient()
+    ledger = Ledger(":memory:")
+    LiveVenue(c, ledger=ledger).sync([Quote("M", "no", 0.01, 1100)], {}, T0)
+    restarted = LiveVenue(c, ledger=ledger)  # a new process: the order id comes from the ledger
+    assert "o1" in restarted._ours and restarted._fills_since == T0
+    c.fills_resp = {"fills": [fill_row("o1", 200, T0 + timedelta(seconds=40))]}
+    assert [f.qty for f in restarted.fills([], T0 + timedelta(minutes=3))] == [200.0]
+
+
+def test_cancel_all_also_cancels_our_untracked_orders_on_kalshi():
+    c = FakeTradingClient()
+    v = LiveVenue(c)
+    v.sync([Quote("M", "no", 0.01, 1100)], {}, T0)
+    c.leftovers = [
+        {
+            "order_id": "lost",
+            "ticker": "N",
+            "client_order_id": "omen-lp-x",
+            "outcome_side": "no",
+            "no_price_dollars": "0.0100",
+            "remaining_count_fp": "1100.00",
+        }
+    ]
+    v.cancel_all()
+    assert sorted(c.cancelled) == ["lost", "o1"] and not v.orders
+
+
+def test_start_up_survives_an_api_outage_and_adopts_what_it_could_not_cancel():
+    c = FakeTradingClient()
+    v = LiveVenue(c)
+    real = c._signed
+
+    def down(method, path, body=None, params=None, retry=False):
+        raise HttpError("GET /portfolio/orders -> HTTP 503", 503, "")
+
+    c._signed = down
+    assert v.cancel_stale() == 0 and v.errors  # no exception: the loop starts and retries
+    c._signed = real
+    c.leftovers = [
+        {
+            "order_id": "old",
+            "ticker": "M",
+            "client_order_id": "omen-lp-y",
+            "outcome_side": "no",
+            "no_price_dollars": "0.0100",
+            "remaining_count_fp": "900.00",
+        }
+    ]
+    c.fail_cancels = 1
+    assert v.cancel_stale() == 0
+    assert v.orders[("M", "no")].order_id == "old"  # tracked: retried next cycle, its fills are ours
+    assert "old" in v._ours
+
+
+def test_an_order_larger_than_the_wanted_size_is_replaced_to_respect_the_caps():
+    c = FakeTradingClient()
+    v = LiveVenue(c)
+    v.sync([Quote("M", "no", 0.01, 1100)], {}, T0)
+    v.sync([Quote("M", "no", 0.01, 500)], {}, T0)  # the loss cap now allows only 500
+    assert c.cancelled == ["o1"] and c.created[-1]["count"] == "500.00"
+
+
+def live_service(tmp_path, fake: FakeKalshi):
+    svc, ledger = service(tmp_path, fake)
+    svc.venue = LiveVenue(FakeTradingClient(), ledger=ledger)
+    return svc, ledger
+
+
+def test_no_new_orders_while_kalshi_trading_is_paused(tmp_path):
+    fake = FakeKalshi()
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+    svc, _ = live_service(tmp_path, fake)
+    fake.trading = False
+    svc.step()
+    assert svc.venue.client.created == []
+    fake.trading = True
+    fake.now = T0 + timedelta(minutes=1)
+    svc.step()
+    assert [b["side"] for b in svc.venue.client.created] == ["ask"]  # the 1c NO bid (a YES ask at 99c)
+
+
+def test_no_quote_on_the_side_opposite_a_held_position(tmp_path):
+    fake = FakeKalshi()
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+    svc, ledger = service(tmp_path, fake)
+    ledger.lp_record_fill("paper", Fill(T0, "KXRT-FILM-90", "yes", 0.30, 10, 0.0, "x", "t1"))
+    assert svc.step()["dead_quotes"] == 0  # a NO bid would net our YES: a trade, not liquidity
+
+
+def test_inventory_settles_only_once_the_result_is_final(tmp_path):
+    fake = FakeKalshi()
+    svc, ledger = service(tmp_path, fake)
+    ledger.lp_record_fill("paper", Fill(T0, "KXRT-FILM-90", "yes", 0.05, 100, 0.0, "x", "t1"))
+    fake.status, fake.result = "determined", "no"  # can still be disputed
+    svc._refreshed = None
+    svc.step()
+    assert ledger.lp_positions("paper")
+    fake.status = "finalized"
+    fake.now = T0 + timedelta(minutes=1)
+    svc._refreshed = None
+    svc.step()
+    assert not ledger.lp_positions("paper")
+
+
+def test_fills_since_the_last_poll_are_booked_on_exit(tmp_path):
+    fake = FakeKalshi()
+    svc, ledger = live_service(tmp_path, fake)
+    venue = svc.venue
+    venue._ours.add("o9")
+    calls = {"n": 0}
+    real = venue.fills
+
+    def fills(trades, now):
+        calls["n"] += 1
+        if calls["n"] == 2:  # the poll in run()'s finally
+            venue.client.fills_resp = {"fills": [fill_row("o9", 50, T0, fid="last")]}
+        return real(trades, now)
+
+    venue.fills = fills
+    svc.run(cycles=1, sleep=lambda _: None)
+    assert ledger.lp_positions("live")["M"]["no"][0] == 50.0

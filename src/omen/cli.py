@@ -396,7 +396,8 @@ def build_lp(s: Settings):
         if not (s.kalshi_api_key_id and s.kalshi_private_key_path):
             raise ConfigError("live liquidity quoting needs KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PATH")
         signer = KalshiSigner.from_file(s.kalshi_api_key_id, s.kalshi_private_key_path)
-        venue = LiveVenue(KalshiClient(HttpClient(PROD_BASE_URL, rate_per_second=8, max_retries=2), signer))
+        client = KalshiClient(HttpClient(PROD_BASE_URL, rate_per_second=8, max_retries=2), signer)
+        venue = LiveVenue(client, ledger=ledger)  # the ledger keeps our order ids, so fills survive restarts
     else:
         venue = PaperVenue()
     return LiquidityService(s, _client(s), ledger, _notifier(s, ledger), venue), ledger
@@ -422,23 +423,32 @@ def _lp_reconcile(s: Settings, args: argparse.Namespace) -> int:
         print("no live cash snapshots yet: `omen lp run` records one every cycle in live mode")
         return 1
     signer = KalshiSigner.from_file(s.kalshi_api_key_id, s.kalshi_private_key_path)
-    r = reconcile(KalshiClient(HttpClient(PROD_BASE_URL, rate_per_second=8, max_retries=2), signer), snaps)
+    try:
+        r = reconcile(KalshiClient(HttpClient(PROD_BASE_URL, rate_per_second=8, max_retries=2), signer), snaps)
+    except ValueError as exc:
+        print(f"cannot reconcile yet: {exc}")
+        return 1
     et = ZoneInfo("America/New_York")
     f = r.flows
     print("Kalshi reward credits, measured from the account's cash")
     span = f"{r.start.astimezone(et):%b %d %I:%M %p} to {r.end.astimezone(et):%b %d %I:%M %p} ET"
     print(f"  {span}, {len(snaps)} snapshots")
+    if r.cutoff is None:
+        print("  (Kalshi's archive cutoff could not be read: fills or settlements older than it would be missing)")
     print(f"  balance change {r.balance_change:+.2f}")
     print(
         f"  explained: fills -{f.fills:.2f}, fees -{f.fees:.2f}, settlements +{f.settlements:.2f}, "
-        f"deposits +{f.deposits:.2f}, withdrawals -{f.withdrawals:.2f}"
+        f"deposits +{f.deposits:.2f}, withdrawals -{f.withdrawals:.2f}, netted pairs +{f.netted:.2f}"
     )
     if r.paid is None:
         print("  reward credits: not yet known whether the balance counts cash held by resting orders")
         print(f"    if it does: ${r.credits[True]:.2f}; if it does not: ${r.credits[False]:.2f}")
     else:
-        how = "counts" if r.holds_in_balance else "excludes"
-        print(f"  reward credits: ${r.paid:.2f} (the balance {how} resting-order cash; {r.votes} quiet checks agree)")
+        if r.holds_in_balance is None:
+            how = "resting-order cash was the same at both ends, so either balance convention gives this"
+        else:
+            how = f"the balance {'counts' if r.holds_in_balance else 'excludes'} resting-order cash; {r.votes} agree"
+        print(f"  reward credits: ${r.paid:.2f} ({how})")
     # Kalshi pays up to a day after a period ends: compare with what OMEN estimated it earned until a day earlier
     est = ledger.lp_reward_between("live", r.start, r.end - timedelta(days=1))
     print(f"  OMEN's formula estimate, earned until a day before the end: ${est:.2f}")
@@ -467,7 +477,8 @@ def cmd_lp(s: Settings, args: argparse.Namespace) -> int:
         with InstanceLock(s.state_dir / "omen-lp.lock"):
             service, _ = build_lp(s)
             if service.mode == "live":
-                print(f"canceled {service.venue.cancel_stale()} resting order(s) left by a previous run")
+                n = service.venue.cancel_stale()  # never raises; anything left is adopted and retried each cycle
+                print(f"canceled {n} resting order(s) left by a previous run; {len(service.venue.orders)} still open")
             print(f"liquidity quoting ({service.mode}); kill switch: {service.kill_file()}")
             service.run(cycles=args.cycles)
         return 0
