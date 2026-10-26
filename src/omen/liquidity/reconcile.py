@@ -5,7 +5,9 @@ Kalshi has no endpoint for reward credits: they arrive as cash in the balance. E
 credit. ``omen lp run`` in live mode records the balance and the cash held by resting orders every cycle; ``omen lp
 reconcile`` does the arithmetic and sets it against OMEN's own formula estimate.
 
-It assumes the account trades only through OMEN, which only buys. A manual sale would be counted as a purchase.
+It assumes the account trades only through OMEN, which only buys: every fill is read as a purchase of its
+``outcome_side`` at that side's price (the deprecated ``action`` field is not used). A manual sale would be counted
+as a purchase.
 """
 
 from __future__ import annotations
@@ -89,9 +91,9 @@ def account_flows(client: Any, start: datetime, end: datetime) -> Flows:
         price = x.get("yes_price_dollars") if side == "yes" else x.get("no_price_dollars")
         qty = float(x.get("count_fp") or 0)
         cost = float(price or 0) * qty
-        f.fills += -cost if x.get("action") == "sell" else cost
+        f.fills += cost
         f.fees += float(x.get("fee_cost") or 0)
-        if side in ("yes", "no") and x.get("action") != "sell":
+        if side in ("yes", "no"):
             sides = bought.setdefault(x.get("ticker", ""), {"yes": 0.0, "no": 0.0})
             sides[side] += qty
         f.events.append(ts)
@@ -160,12 +162,14 @@ class Reconciliation:
 
 
 def live_since(client: Any) -> datetime | None:
-    """The latest of Kalshi's archive cutoffs for fills and settlements: before it, records leave the live endpoints."""
+    """The latest of Kalshi's archive cutoffs for fills, markets and settled positions: before it, records leave the
+    live endpoints (``/portfolio/settlements`` follows the positions cutoff)."""
     try:
         data = client.http.get_json("/historical/cutoff")
     except Exception:  # unknown cutoff: reconcile the whole window (the output says so)
         return None
-    stamps = [_ts(data.get(k)) for k in ("trades_created_ts", "market_settled_ts")]
+    keys = ("trades_created_ts", "market_settled_ts", "market_positions_last_updated_ts")  # fills, markets, settlements
+    stamps = [_ts(data.get(k)) for k in keys]
     known = [t for t in stamps if t is not None]
     return max(known) if known else None
 

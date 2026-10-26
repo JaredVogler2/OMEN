@@ -68,6 +68,9 @@ CREATE TABLE IF NOT EXISTS lp_settlements (
   payout REAL NOT NULL, PRIMARY KEY(mode, ticker));
 CREATE TABLE IF NOT EXISTS lp_cash (
   mode TEXT NOT NULL, ts TEXT NOT NULL, balance REAL NOT NULL, holds REAL NOT NULL, PRIMARY KEY(mode, ts));
+CREATE TABLE IF NOT EXISTS lp_pending (
+  mode TEXT NOT NULL, ticker TEXT NOT NULL, side TEXT NOT NULL, client_order_id TEXT NOT NULL, sent TEXT NOT NULL,
+  PRIMARY KEY(mode, ticker, side));
 CREATE TABLE IF NOT EXISTS lp_orders (
   mode TEXT NOT NULL, order_id TEXT NOT NULL, client_order_id TEXT, ticker TEXT NOT NULL, side TEXT NOT NULL,
   price REAL NOT NULL, placed TEXT NOT NULL, PRIMARY KEY(mode, order_id));
@@ -547,6 +550,20 @@ class Ledger:
             "VALUES(?,?,?,?,?,?,?)",
             (mode, order_id, client_order_id, ticker, side, price, iso(placed)),
         )
+
+    def lp_pending_add(self, mode: str, ticker: str, side: str, client_order_id: str, sent: datetime) -> None:
+        """A create whose outcome is unknown (timeout, 5xx): looked up by client order id, even after a restart."""
+        self.db.execute(
+            "INSERT OR REPLACE INTO lp_pending(mode,ticker,side,client_order_id,sent) VALUES(?,?,?,?,?)",
+            (mode, ticker, side, client_order_id, iso(sent)),
+        )
+
+    def lp_pending_done(self, mode: str, ticker: str, side: str) -> None:
+        self.db.execute("DELETE FROM lp_pending WHERE mode=? AND ticker=? AND side=?", (mode, ticker, side))
+
+    def lp_pending(self, mode: str) -> dict[tuple[str, str], tuple[str, datetime]]:
+        rows = self.db.execute("SELECT ticker, side, client_order_id, sent FROM lp_pending WHERE mode=?", (mode,))
+        return {(r["ticker"], r["side"]): (r["client_order_id"], datetime.fromisoformat(r["sent"])) for r in rows}
 
     def lp_order_ids(self, mode: str) -> set[str]:
         return {r["order_id"] for r in self.db.execute("SELECT order_id FROM lp_orders WHERE mode=?", (mode,))}
