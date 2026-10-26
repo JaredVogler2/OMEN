@@ -204,13 +204,16 @@ class Venue(Protocol):
     mode: str
     orders: dict[tuple[str, str], Resting]
 
+    @property
+    def ready(self) -> bool: ...
+
     def reconcile(self, now: datetime) -> int: ...
 
     def sync(self, desired: list[Quote], books: dict[str, OrderBook], now: datetime) -> None: ...
 
     def fills(self, trades: list[dict], now: datetime) -> list[Fill]: ...
 
-    def cancel_all(self) -> None: ...
+    def cancel_all(self) -> bool: ...
 
 
 def without_orders(book: OrderBook, orders: Iterable[Resting]) -> OrderBook:
@@ -266,6 +269,7 @@ class PaperVenue:
     joined the level; a trade through our price fills us completely (the matching engine reached us first)."""
 
     mode = "paper"
+    ready = True  # paper always knows its own orders
 
     def __init__(self) -> None:
         self.orders: dict[tuple[str, str], Resting] = {}
@@ -318,13 +322,15 @@ class PaperVenue:
             del self.orders[key]
         return out
 
-    def cancel_all(self) -> None:
+    def cancel_all(self) -> bool:
         self.orders.clear()
+        return True
 
 
 RECONCILE_GRACE = timedelta(seconds=30)  # an order this new may not be listed yet: the API lags the exchange
 FILLS_LOOKBACK = timedelta(minutes=10)  # fills are re-read this far back, so an order adopted late still books them
 PENDING_TIMEOUT = timedelta(minutes=5)  # a create with an unknown outcome is looked for this long, then forgotten
+FILLS_MARK = "lp_live_fills_since"  # ledger meta key: the last successful fills poll
 
 
 class LiveVenue:
@@ -344,10 +350,21 @@ class LiveVenue:
         self.orders: dict[tuple[str, str], Resting] = {}
         self.pending: dict[tuple[str, str], tuple[str, datetime]] = {}  # unknown-outcome creates: client id, sent
         self.errors: list[str] = []
+        self.orders_ok = True  # the last read of Kalshi's resting orders worked
+        self.fills_ok = True  # the last read of our fills worked
         self._seen_fills: set[str] = set()
         # every order id this venue (or an earlier run) placed or adopted: other fills on the account are not ours
         self._ours: set[str] = ledger.lp_order_ids(self.mode) if ledger is not None else set()
-        self._fills_since: datetime | None = ledger.lp_last_activity(self.mode) if ledger is not None else None
+        self._fills_since: datetime | None = None  # the last successful fills poll (kept in the ledger)
+        if ledger is not None:
+            mark = ledger.get_meta(FILLS_MARK)
+            self._fills_since = datetime.fromisoformat(mark) if mark else ledger.lp_last_activity(self.mode)
+            self.pending.update(ledger.lp_pending(self.mode))
+
+    @property
+    def ready(self) -> bool:
+        """Place orders only when this cycle read both Kalshi's resting orders and our fills."""
+        return self.orders_ok and self.fills_ok
 
     @staticmethod
     def order_body(q: Quote, client_order_id: str) -> dict:
@@ -420,7 +437,9 @@ class LiveVenue:
         Orders younger than RECONCILE_GRACE are left alone: the API can lag the exchange by a moment."""
         rows = self._orders({"status": "resting"})
         if rows is None:
+            self.orders_ok = False  # unknown what rests: placing now could double an order
             return 0  # keep the local book as it is; try again next cycle
+        self.orders_ok = True
         resting = {r.get("order_id"): r for r in rows}
         dropped = 0
         for key, o in list(self.orders.items()):
@@ -440,7 +459,7 @@ class LiveVenue:
             side, price = self._row_side_price(row)
             key = (row.get("ticker", ""), side)
             self._remember(oid, cid, key[0], side, price, now)
-            self.pending.pop(key, None)
+            self._resolve(key)
             o = Resting(key[0], side, price, float(row.get("remaining_count_fp") or 0), 0.0, oid, now - RECONCILE_GRACE)
             if key in self.orders:  # a second order on one side: cancel the stray (retried next cycle if it fails)
                 self._cancel(o)
@@ -448,13 +467,22 @@ class LiveVenue:
                 self.orders[key] = o
                 tracked.add(oid)
         for key, (cid, sent) in list(self.pending.items()):  # never listed as resting: find it in any status
-            if self._found(key[0], cid, now) or now - sent >= PENDING_TIMEOUT:
-                del self.pending[key]
+            found = self._found(key[0], cid, now)
+            if found or (found is False and now - sent >= PENDING_TIMEOUT):
+                self._resolve(key)  # recorded, or listed nowhere for five minutes: it never reached Kalshi
         return dropped
 
-    def _found(self, ticker: str, client_order_id: str, now: datetime) -> bool:
-        """Record the order id of an unknown-outcome create that filled or was cancelled before it was seen resting."""
-        for row in self._orders({"ticker": ticker}) or []:
+    def _resolve(self, key: tuple[str, str]) -> None:
+        if self.pending.pop(key, None) is not None and self.ledger is not None:
+            self.ledger.lp_pending_done(self.mode, key[0], key[1])
+
+    def _found(self, ticker: str, client_order_id: str, now: datetime) -> bool | None:
+        """Record the order id of an unknown-outcome create that filled or was cancelled before it was seen resting;
+        None when the lookup itself failed."""
+        rows = self._orders({"ticker": ticker})
+        if rows is None:
+            return None
+        for row in rows:
             if row.get("client_order_id") == client_order_id:
                 side, price = self._row_side_price(row)
                 self._remember(row.get("order_id", ""), client_order_id, ticker, side, price, now)
@@ -476,6 +504,8 @@ class LiveVenue:
                 self.errors.append(f"place {q.ticker} {q.side}@{q.price}: {exc}")
                 if exc.status is None or exc.status >= 500:  # timeout, reset or 5xx: Kalshi may have taken it
                     self.pending[key] = (cid, now)
+                    if self.ledger is not None:  # survives a restart, so its fills are still attributed
+                        self.ledger.lp_pending_add(self.mode, key[0], key[1], cid, now)
                 continue  # a 4xx (post-only cross, 429, bad request) placed nothing: try again next cycle
             oid = resp.get("order_id", "")
             self._remember(oid, cid, q.ticker, q.side, q.price, now)
@@ -498,6 +528,7 @@ class LiveVenue:
                 data = self.client._signed("GET", "/portfolio/fills", params=params)
             except HttpError as exc:
                 self.errors.append(f"fills: {exc}")
+                self.fills_ok = False  # the ledger may lack fills: sizing new orders from it could breach a cap
                 return out  # _fills_since stays: the next poll covers this window again
             rows.extend(data.get("fills") or [])
             cursor = data.get("cursor") or ""
@@ -524,23 +555,28 @@ class LiveVenue:
                 )
             )
         self._fills_since = now
+        self.fills_ok = True
+        if self.ledger is not None:
+            self.ledger.set_meta(FILLS_MARK, now.isoformat())
         return out
 
-    def cancel_all(self) -> None:
+    def cancel_all(self) -> bool:
         """Cancel every order we track, then every order of ours still resting on Kalshi (untracked ones included);
         whatever could not be cancelled stays in ``orders`` for the next attempt."""
         for key in list(self.orders):
             if self._cancel(self.orders[key]):
                 del self.orders[key]
-        self.cancel_stale()
+        return self.cancel_stale() is not None and not self.orders  # True: nothing of ours is known to rest
 
-    def cancel_stale(self) -> int:
+    def cancel_stale(self) -> int | None:
         """Cancel resting orders whose client order id starts with this venue's tag (a previous run's, or ones this
         run lost track of); returns how many were cancelled. Failures are adopted, so they are retried and their fills
-        are booked. Never raises: an API outage at start-up must not stop the service."""
+        are booked. None when the orders could not be listed. Never raises: an API outage at start-up must not stop
+        the service (and ``ready`` stays False, so nothing is placed until a cycle can read the orders)."""
         rows = self._orders({"status": "resting"})
         if rows is None:
-            return 0
+            self.orders_ok = False
+            return None
         n = 0
         now = datetime.now(UTC)
         for row in rows:

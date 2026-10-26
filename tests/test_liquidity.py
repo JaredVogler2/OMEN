@@ -906,7 +906,7 @@ def test_start_up_survives_an_api_outage_and_adopts_what_it_could_not_cancel():
         raise HttpError("GET /portfolio/orders -> HTTP 503", 503, "")
 
     c._signed = down
-    assert v.cancel_stale() == 0 and v.errors  # no exception: the loop starts and retries
+    assert v.cancel_stale() is None and v.errors and not v.ready  # no exception; nothing is placed until it reads
     c._signed = real
     c.leftovers = [
         {
@@ -991,3 +991,76 @@ def test_fills_since_the_last_poll_are_booked_on_exit(tmp_path):
     venue.fills = fills
     svc.run(cycles=1, sleep=lambda _: None)
     assert ledger.lp_positions("live")["M"]["no"][0] == 50.0
+
+
+def test_nothing_is_placed_in_a_cycle_that_could_not_read_kalshis_orders(tmp_path):
+    fake = FakeKalshi()
+    fake.book = {"yes_dollars": [["0.9800", "2000.00"]], "no_dollars": []}
+    svc, _ = live_service(tmp_path, fake)
+    c = svc.venue.client
+    real = c._signed
+
+    def orders_down(method, path, body=None, params=None, retry=False):
+        if path == "/portfolio/orders":
+            raise HttpError("GET /portfolio/orders -> HTTP 503", 503, "")
+        return real(method, path, body, params, retry)
+
+    c._signed = orders_down
+    svc.step()
+    assert c.created == []  # an earlier run's bid might be resting there: never place blind
+    c._signed = real
+    fake.now = T0 + timedelta(minutes=1)
+    svc.step()
+    assert len(c.created) == 1
+
+
+def test_the_fills_read_point_survives_a_restart_even_if_later_snapshots_were_written(tmp_path):
+    c = FakeTradingClient()
+    ledger = Ledger(":memory:")
+    v = LiveVenue(c, ledger=ledger)
+    v.fills([], T0)
+    ledger.lp_add_cash("live", T0 + timedelta(hours=2), 100.0, 0.0)  # cycles kept running while fills failed
+    assert LiveVenue(c, ledger=ledger)._fills_since == T0  # resumes from the last fills actually read
+
+
+def test_a_pending_create_survives_a_restart_and_is_found_in_any_status():
+    c = FakeTradingClient()
+    ledger = Ledger(":memory:")
+    v = LiveVenue(c, ledger=ledger)
+    c.lose_creates = 1
+    v.sync([Quote("M", "no", 0.01, 1100)], {}, T0)
+    c.rows["o1"]["status"] = "executed"
+    restarted = LiveVenue(c, ledger=ledger)  # the process died before it could look the order up
+    assert ("M", "no") in restarted.pending
+    restarted.reconcile(T0 + timedelta(minutes=10))
+    assert "o1" in restarted._ours and not restarted.pending and ledger.lp_pending("live") == {}
+
+
+def test_a_pending_create_is_kept_while_the_lookup_itself_fails():
+    c = FakeTradingClient()
+    v = LiveVenue(c)
+    c.lose_creates = 1
+    v.sync([Quote("M", "no", 0.01, 1100)], {}, T0)
+    c.rows["o1"]["status"] = "executed"  # not listed as resting, so only the any-status lookup can find it
+    v._found = lambda ticker, cid, now: None  # ...and that lookup is down
+    v.reconcile(T0 + timedelta(minutes=10))
+    assert ("M", "no") in v.pending  # past the timeout, but never confirmed absent
+
+
+def test_a_cash_snapshot_is_stamped_when_the_balance_was_read(tmp_path):
+    fake = FakeKalshi()
+    svc, ledger = live_service(tmp_path, fake)
+    svc.clock = lambda: T0 + timedelta(seconds=7)
+    svc._record_cash(T0)
+    assert ledger.lp_cash("live")[0][0] == T0 + timedelta(seconds=7)
+
+
+def test_cancel_all_reports_failure_when_kalshis_orders_cannot_be_listed():
+    c = FakeTradingClient()
+    v = LiveVenue(c)
+
+    def down(method, path, body=None, params=None, retry=False):
+        raise HttpError("GET /portfolio/orders -> HTTP 503", 503, "")
+
+    c._signed = down
+    assert v.cancel_all() is False  # the kill-switch notice must not claim everything was cancelled

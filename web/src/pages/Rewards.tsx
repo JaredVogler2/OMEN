@@ -29,7 +29,7 @@ export default function Rewards({ dash }: { dash: Dashboard | null }) {
 }
 
 function Body({ lp }: { lp: Liquidity }) {
-  const net = lp.total.reward_usd + lp.total.settled_pnl - lp.total.fees;
+  const net = lp.total.reward_usd + lp.total.settled_pnl; // settled P&L already includes the fees paid
   const inventoryCost = lp.inventory.reduce((a, r) => a + r.cost, 0);
   const cumulative = useMemo(() => {
     let cum = 0;
@@ -58,7 +58,7 @@ function Body({ lp }: { lp: Liquidity }) {
           icon={<Wallet size={14} />}
           tone={net >= 0 ? "lock" : "crit"}
           value={signedUsd(net)}
-          sub="rewards + settled P&L − fees"
+          sub="rewards + settled P&L, after fees"
         />
       </div>
 

@@ -110,15 +110,15 @@ class LiquidityService:
         stats: dict = {"time": now.isoformat(timespec="seconds"), "mode": self.mode}
         if self.kill_file().exists():
             self._accrue(now, {})
-            self.venue.cancel_all()  # every killed cycle: tracked orders, then any of ours still resting on Kalshi
+            clean = self.venue.cancel_all()  # every killed cycle: tracked orders, then any of ours on Kalshi
             if not self._killed:
                 self._killed = True
-                left = len(self.venue.orders)
                 self._say(
                     "Liquidity quoting stopped (kill switch)",
                     f"{self.kill_file()} exists; every resting order was canceled."
-                    if not left
-                    else f"{self.kill_file()} exists; {left} cancel(s) failed and are retried every cycle.",
+                    if clean
+                    else f"{self.kill_file()} exists; some orders could not be canceled or listed yet. "
+                    "Cancels are retried every cycle.",
                     "warning",
                 )
             stats["killed"] = True
@@ -127,7 +127,12 @@ class LiquidityService:
         self._killed = False
         if self._refreshed is None or now - self._refreshed >= REFRESH:
             self._refresh(now)
-        self.venue.reconcile(now)  # live: Kalshi's resting orders and sizes, before anything reads the local book
+        new: list[Fill] = []
+        if self.mode == "live":
+            # fills first, then Kalshi's resting orders and sizes: the ledger and the local book then agree, and both
+            # are read before anything decides on them
+            new = self._book_fills(self.venue.fills([], now))
+            self.venue.reconcile(now)
         held = self.ledger.lp_positions(self.mode)
         tickers = sorted({p.ticker for p in self.programs} | {p.ticker for p in self.dead_programs} | set(held))
         self.books = self.client.orderbooks(tickers) if tickers else {}
@@ -136,17 +141,16 @@ class LiquidityService:
         # paper fills come from the public tape; dead-side completion also needs it (live) to measure 1c sales
         tape = self._tape(now) if self.mode == "paper" or self.cfg.complete_dead_sides else []
         self._observe_flow(now, tape)
-        fills = self.venue.fills(tape, now)
         if self.mode == "paper":
-            fills += self._imputed_dead_fills(now)
-        new = self._book_fills(fills)
+            new = self._book_fills(self.venue.fills(tape, now) + self._imputed_dead_fills(now))
         # the interval just ended earned the average of its start rate and its end rate: the end rate prices our
         # orders where they actually rested in the new book (a best bid that moved past us, or a fill, cuts it)
         self._accrue(now, self._current_rates())
         held = self.ledger.lp_positions(self.mode)
         desired = self._desired(now, held)
-        if self.mode != "live" or self._trading_active():
-            self.venue.sync(desired, self.books, now)  # during a pause Kalshi rejects new orders: wait it out
+        if self.mode != "live" or (self.venue.ready and self._trading_active()):
+            # live: never act on a book or ledger this cycle could not read; during a pause Kalshi rejects orders
+            self.venue.sync(desired, self.books, now)
         self._rates = self._current_rates()
         if self.mode == "live":
             self._record_cash(now)
@@ -387,7 +391,8 @@ class LiquidityService:
         for score, q in candidates:
             if score <= 0:
                 break
-            cost = q.price * q.size
+            resting = self.venue.orders.get((q.ticker, q.side))  # a kept order may be larger than the new quote
+            cost = q.price * max(q.size, resting.size if resting is not None else 0.0)
             key = series_of(q.ticker)
             if cost > budget or by_series.get(key, 0.0) + cost > series_cap:
                 continue
@@ -439,7 +444,7 @@ class LiquidityService:
         except (HttpError, KeyError, TypeError, ValueError) as exc:  # never stop quoting over bookkeeping
             log.warning("cash snapshot failed: %s", exc)
             return
-        self.ledger.lp_add_cash(self.mode, now, snap.balance, snap.holds)
+        self.ledger.lp_add_cash(self.mode, snap.ts, snap.balance, snap.holds)
 
     def _settle(self, now: datetime, held: dict[str, dict[str, list[float]]]) -> int:
         done = 0
@@ -550,7 +555,9 @@ class LiquidityService:
                 if cycles is None or n < cycles:
                     sleep(max(0.0, self.cfg.cycle_seconds - (time.monotonic() - started)))
         finally:
-            self.venue.cancel_all()
+            if not self.venue.cancel_all() and self.mode == "live":
+                sleep(2.0)  # a create cut short by the stop may be listed a moment late: sweep once more
+                self.venue.cancel_all()
             try:  # fills since the last poll would otherwise be lost with this process
                 self._book_fills(self.venue.fills([], self.clock()))
             except Exception:  # shutting down: the next start re-reads fills from the ledger's last time

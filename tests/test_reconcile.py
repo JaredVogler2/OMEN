@@ -160,3 +160,26 @@ def test_the_window_starts_after_kalshis_archive_cutoff():
     snaps = [Snapshot(T0, 100.0, 0.0), Snapshot(at(40), 100.0, 0.0), Snapshot(at(1440), 112.0, 0.0)]
     r = reconcile(acct, snaps)
     assert r.start == at(40) and r.cutoff == at(30) and r.paid == pytest.approx(12.0)
+
+
+def test_every_fill_is_a_purchase_of_its_outcome_side_whatever_the_legacy_action_says():
+    row = fill(at(5), 100, 0.01, side="no")
+    row["action"] = "sell"  # a V2 ask (OMEN's NO bid) may carry legacy "sell yes"
+    f = account_flows(FakeAccount(0.0, fills=[row]), T0, at(60))
+    assert f.fills == pytest.approx(1.0) and f.netted == 0.0
+
+
+def test_the_settlement_cutoff_counts_too():
+    class Http:
+        @staticmethod
+        def get_json(path):
+            return {
+                "trades_created_ts": at(10).isoformat(),
+                "market_settled_ts": at(10).isoformat(),
+                "market_positions_last_updated_ts": at(50).isoformat(),  # settlements leave the live tier here
+            }
+
+    acct = FakeAccount(0.0)
+    acct.http = Http()
+    snaps = [Snapshot(at(40), 100.0, 0.0), Snapshot(at(60), 100.0, 0.0), Snapshot(at(1440), 105.0, 0.0)]
+    assert reconcile(acct, snaps).start == at(60)

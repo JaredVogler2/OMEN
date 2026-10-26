@@ -21,6 +21,8 @@ RestartSec=60
 # 2 = bad configuration, 3 = a second instance already holds the ledger lock: do not restart-loop
 RestartPreventExitStatus=2 3
 TimeoutStopSec=60
+# SIGTERM to uv only (it forwards one to omen), so the cancel-everything cleanup is not interrupted
+KillMode=mixed
 MemoryMax=400M
 Nice=5
 UMask=0077

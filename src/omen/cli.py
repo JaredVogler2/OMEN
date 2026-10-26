@@ -471,6 +471,9 @@ def cmd_lp(s: Settings, args: argparse.Namespace) -> int:
             return 0
 
         def stop(signum, frame):  # systemd stops with SIGTERM: exit through run()'s cancel-everything cleanup
+            # a second SIGTERM (uv forwards one, systemd may send another) must not abort that cleanup
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
             raise SystemExit(0)
 
         signal.signal(signal.SIGTERM, stop)
@@ -478,7 +481,10 @@ def cmd_lp(s: Settings, args: argparse.Namespace) -> int:
             service, _ = build_lp(s)
             if service.mode == "live":
                 n = service.venue.cancel_stale()  # never raises; anything left is adopted and retried each cycle
-                print(f"canceled {n} resting order(s) left by a previous run; {len(service.venue.orders)} still open")
+                if n is None:
+                    print("could not list resting orders (API down?); no order is placed until they can be read")
+                else:
+                    print(f"canceled {n} order(s) left by a previous run; {len(service.venue.orders)} still open")
             print(f"liquidity quoting ({service.mode}); kill switch: {service.kill_file()}")
             service.run(cycles=args.cycles)
         return 0
